@@ -20,6 +20,7 @@
 
       manifest = pkgs.writeText "coolix-apps.json" (builtins.toJSON {
         version = 1;
+        rev = inputs.self.rev or inputs.self.dirtyRev or "unknown";
         apps = lib.mapAttrs (_: app: app.manifest) apps;
       });
 

@@ -95,6 +95,15 @@ func (r *Repo) Commit(msg string) error {
 	return r.git("commit", "-q", "-m", msg)
 }
 
+// RestoreTree makes the working tree and index match rev (deleting files
+// added since), ready to be committed as a rollback.
+func (r *Repo) RestoreTree(rev string) error {
+	if err := r.git("rev-parse", "--verify", "--quiet", rev+"^{commit}"); err != nil {
+		return fmt.Errorf("revision %s not found in apps repo", rev)
+	}
+	return r.git("read-tree", "-u", "--reset", rev)
+}
+
 func (r *Repo) RemoveApp(name string) error {
 	dir := filepath.Join(r.Dir, "apps", name)
 	if _, err := os.Stat(dir); err != nil {

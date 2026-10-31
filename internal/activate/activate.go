@@ -28,6 +28,7 @@ type AppManifest struct {
 
 type Manifest struct {
 	Version int                    `json:"version"`
+	Rev     string                 `json:"rev"`
 	Apps    map[string]AppManifest `json:"apps"`
 }
 

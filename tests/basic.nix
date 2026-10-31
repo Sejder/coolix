@@ -1,5 +1,6 @@
-# Milestone 1: add an app, deploy it, redeploy a new version, remove it,
-# and check it comes back after a reboot. The VM is offline, so everything the
+# Milestones 1-2: deploy, redeploy, privilege separation, generations,
+# rollback, reboot persistence and removal.
+# The VM is offline, so everything the
 # in-VM nix builds must already be in its store (extraDependencies).
 { self }:
 { pkgs, lib, ... }:
@@ -40,33 +41,58 @@ in
     machine.wait_for_unit("multi-user.target")
 
     # A writable copy of the app source, so we can bump its version.
-    machine.succeed("cp -rL /etc/coolix-test-app /root/app && chmod -R u+w /root/app")
+    machine.succeed("cp -rL /etc/coolix-test-app /srv/app && chmod -R u+w /srv/app")
 
-    machine.succeed("coolix app add hello --source path:/root/app")
+    def served(version):
+        machine.wait_until_succeeds(f"curl -sf http://127.0.0.1:20000/ | grep -x {version}", timeout=30)
+
+    machine.succeed("coolix app add hello --source path:/srv/app")
     machine.succeed("coolix app list | grep hello")
     machine.succeed("coolix deploy hello >&2")
-
     machine.wait_for_unit("coolix-app-hello@blue.service")
-    machine.wait_for_open_port(20000)
-    machine.succeed("curl -sf http://127.0.0.1:20000/ | grep -x v1")
+    served("v1")
 
-    # Hardening is on.
-    machine.succeed("systemctl show coolix-app-hello@blue -p DynamicUser | grep -x DynamicUser=yes")
+    with subtest("hardening is on"):
+        machine.succeed("systemctl show coolix-app-hello@blue -p DynamicUser | grep -x DynamicUser=yes")
 
-    with subtest("redeploy picks up a new revision"):
-        machine.succeed("echo v2 > /root/app/VERSION")
-        machine.succeed("coolix deploy hello >&2")
-        machine.wait_until_succeeds("curl -sf http://127.0.0.1:20000/ | grep -x v2")
+    with subtest("root drops to the coolix user; only activation runs as root"):
+        machine.succeed("test $(stat -c %U /var/lib/coolix/repo/.git) = coolix")
+        machine.succeed("journalctl -u 'coolix-activate@*' | grep 'started \\[hello\\]'")
 
-    with subtest("deploys are committed to the apps repo"):
-        machine.succeed("git -C /var/lib/coolix/repo log --oneline | grep 'Deploy hello'")
+    with subtest("coolix user may start only valid activation units"):
+        machine.fail("runuser -u coolix -- systemctl start --no-ask-password systemd-tmpfiles-clean.service")
+        machine.fail("runuser -u coolix -- systemctl start --no-ask-password coolix-activate@foo.service")
+
+    with subtest("redeploy as the coolix user picks up a new revision"):
+        machine.succeed("echo v2 > /srv/app/VERSION")
+        machine.succeed("runuser -u coolix -- coolix deploy hello >&2")
+        served("v2")
+        machine.succeed("runuser -u coolix -- git -C /var/lib/coolix/repo log --oneline | grep 'Deploy hello'")
+
+    with subtest("generations"):
+        out = machine.succeed("coolix generations")
+        print(out)
+        assert "2 (current)" in out, out
+        assert "hello" in out, out
+
+    with subtest("rollback restores the running app and the repo"):
+        machine.succeed("coolix rollback >&2")
+        served("v1")
+        out = machine.succeed("coolix generations")
+        assert "3 (current)" in out, out
+        machine.succeed("runuser -u coolix -- git -C /var/lib/coolix/repo log -1 --format=%s | grep 'Rollback to generation 1'")
+        machine.fail("coolix rollback 3")  # already current
+        machine.fail("coolix rollback 99")
+
+    with subtest("rollback to an explicit generation"):
+        machine.succeed("coolix rollback 2 >&2")
+        served("v2")
 
     with subtest("apps come back after reboot"):
         machine.shutdown()
         machine.start()
         machine.wait_for_unit("coolix-activate-boot.service")
-        machine.wait_for_open_port(20000)
-        machine.succeed("curl -sf http://127.0.0.1:20000/ | grep -x v2")
+        served("v2")
 
     with subtest("removing an app stops it"):
         machine.succeed("coolix app rm hello")

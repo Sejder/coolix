@@ -4,7 +4,7 @@ A NixOS-native self-hosting PaaS in the spirit of Coolify and Dokploy, minus
 the Docker: apps are Nix flakes, run as hardened systemd units, and everything
 deployed is recorded in a git repo.
 
-> Status: early development (milestone 1 of 6). Not ready for use.
+> Status: early development (milestone 2 of 6). Not ready for use.
 
 ## How it works
 
@@ -14,6 +14,13 @@ deployed is recorded in a git repo.
   (`/nix/var/nix/profiles/coolix/apps`) and activates it: units are linked into
   `/run/systemd/system` and changed apps restart. Your host's
   `nixos-rebuild` is never involved.
+- Every deploy is a profile **generation** tied to an apps-repo commit.
+  `coolix rollback` re-activates an older generation without rebuilding and
+  commits the matching repo state, so the repo always describes what runs.
+- Repo edits and builds run as the unprivileged `coolix` user; only
+  activation runs as root, in `coolix-activate@<profile>.service`, which
+  polkit lets `coolix` start (and nothing else). Access to the `coolix`
+  user is still root-equivalent, since it decides which units run.
 - Each app needs a flake exposing `packages.<system>.default` that reads `$PORT`.
 
 ## Usage
@@ -30,6 +37,8 @@ services.coolix.enable = true;
 sudo coolix app add blog --source github:me/blog --domain blog.example.com
 sudo coolix deploy blog
 sudo coolix app list
+sudo coolix generations
+sudo coolix rollback        # previous generation, or: coolix rollback 3
 ```
 
 ## Development

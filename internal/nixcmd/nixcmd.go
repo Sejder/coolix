@@ -41,9 +41,10 @@ func Lock(ctx context.Context, flakeDir string, logw io.Writer, update ...string
 	return err
 }
 
-// Build builds a flake output and returns its store path.
-func Build(ctx context.Context, installable string, logw io.Writer) (string, error) {
-	return run(ctx, "", logw, "build", "--no-link", "--print-out-paths", "-L", installable)
+// Build builds a flake output, registers outLink as a GC root for it and
+// returns its store path.
+func Build(ctx context.Context, installable, outLink string, logw io.Writer) (string, error) {
+	return run(ctx, "", logw, "build", "--out-link", outLink, "--print-out-paths", "-L", installable)
 }
 
 // SetProfile points a profile at storePath, creating a new generation.

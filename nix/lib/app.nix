@@ -78,8 +78,8 @@ let
         EnvironmentFile = "${envDir}/%i.env";
         Restart = "on-failure";
         RestartSec = 2;
-        StateDirectory = "coolix/apps/${name}";
-        WorkingDirectory = "%S/coolix/apps/${name}";
+        StateDirectory = "coolix-apps/${name}";
+        WorkingDirectory = "%S/coolix-apps/${name}";
         SyslogIdentifier = "coolix-${name}";
       };
     }

@@ -1,6 +1,8 @@
 package repo
 
 import (
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -49,5 +51,39 @@ func TestInitAndCommit(t *testing.T) {
 	// Second commit with no changes must be a no-op, not an error.
 	if err := r.Commit("nothing"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRestoreTree(t *testing.T) {
+	r := &Repo{Dir: t.TempDir(), Nixpkgs: "/nix/store/a", Lib: "/nix/store/b", System: "x86_64-linux"}
+	if err := r.Init(); err != nil {
+		t.Fatal(err)
+	}
+	head := func() string {
+		out, err := exec.Command("git", "-C", r.Dir, "rev-parse", "HEAD").Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	base := head()
+	if err := appdef.Save(r.Dir, &appdef.App{Name: "blog", Source: "github:me/blog", PortBase: 20000}); err != nil {
+		t.Fatal(err)
+	}
+	r.Sync()
+	if err := r.Commit("add blog"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RestoreTree(base); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(appdef.Path(r.Dir, "blog")); !os.IsNotExist(err) {
+		t.Fatal("app added after base revision should be gone")
+	}
+	if err := r.Commit("rollback"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RestoreTree("deadbeef"); err == nil {
+		t.Fatal("expected error for unknown revision")
 	}
 }
