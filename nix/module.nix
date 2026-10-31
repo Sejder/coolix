@@ -39,6 +39,9 @@ let
     COOLIX_DEFAULT_MEMORY_MAX = cfg.apps.defaultMemoryMax;
   } // lib.optionalAttrs (cfg.ui.domain != null) {
     COOLIX_UI_DOMAIN = cfg.ui.domain;
+  } // lib.optionalAttrs cfg.git.enable {
+    COOLIX_GIT_HOST = cfg.git.host;
+    COOLIX_GIT_PORT = toString cfg.git.port;
   } // lib.optionalAttrs cfg.caddy.enable {
     COOLIX_CADDY_DIR = caddyDir;
     COOLIX_TLS = cfg.caddy.tls;
@@ -174,6 +177,36 @@ in
       };
     };
 
+    git = {
+      enable = lib.mkEnableOption ''
+        deploys by `git push` over SSH (to `coolix@host:APP`) for apps with
+        `source = "push"`. Needs `services.openssh`. The coolix user's SSH
+        logins can only run git push and fetch for push apps: sshd forces
+        `coolix ssh-serve` and forbids terminals and forwarding
+      '';
+      host = lib.mkOption {
+        type = lib.types.str;
+        default = if cfg.ui.domain != null then cfg.ui.domain else config.networking.fqdnOrHostName;
+        defaultText = lib.literalExpression "if ui.domain != null then ui.domain else networking.fqdnOrHostName";
+        description = "Host name shown in push remotes (`coolix@<host>:APP`).";
+      };
+      port = lib.mkOption {
+        type = lib.types.port;
+        default = lib.head (config.services.openssh.ports ++ [ 22 ]);
+        defaultText = lib.literalExpression "head services.openssh.ports";
+        description = "SSH port shown in push remotes.";
+      };
+      authorizedKeys = lib.mkOption {
+        type = lib.types.listOf lib.types.singleLineStr;
+        default = [ ];
+        example = [ "ssh-ed25519 AAAAC3Nza... alice@laptop" ];
+        description = ''
+          SSH public keys that may push to every push app. More keys can be
+          added in the web UI (account page) or with `coolix ssh-key add`.
+        '';
+      };
+    };
+
     ui = {
       enable = lib.mkOption {
         type = lib.types.bool;
@@ -224,6 +257,10 @@ in
         message = "services.coolix.portRange.from must be lower than portRange.to";
       }
       {
+        assertion = cfg.git.enable -> config.services.openssh.enable;
+        message = "services.coolix.git.enable requires services.openssh.enable";
+      }
+      {
         assertion = cfg.ui.domain != null -> cfg.caddy.enable;
         message = "services.coolix.ui.domain requires services.coolix.caddy.enable";
       }
@@ -256,7 +293,36 @@ in
       isSystemUser = true;
       group = "coolix";
       home = cfg.stateDir;
+      # sshd runs its ForceCommand through the login shell.
+      shell = lib.mkIf cfg.git.enable pkgs.bashInteractive;
+      openssh.authorizedKeys.keys = map (k: "restrict ${k}") cfg.git.authorizedKeys;
     };
+
+    # git push over SSH: every login of the coolix user runs `coolix
+    # ssh-serve`, which only answers git requests for push apps. Keys come
+    # from NixOS (services.coolix.git.authorizedKeys) and from the UI,
+    # through AuthorizedKeysCommand. sshd refuses to run that from the
+    # group-writable /nix/store, so it's a copied script in /etc.
+    environment.etc."coolix/ssh-authorized-keys" = lib.mkIf cfg.git.enable {
+      mode = "0555";
+      text = ''
+        #!${pkgs.runtimeShell}
+        exec ${cfg.package}/bin/coolix ssh-authorized-keys ${lib.escapeShellArg cfg.stateDir}
+      '';
+    };
+    services.openssh.extraConfig = lib.mkIf cfg.git.enable (lib.mkAfter ''
+      Match User coolix
+        AuthorizedKeysFile /etc/ssh/authorized_keys.d/coolix
+        AuthorizedKeysCommand /etc/coolix/ssh-authorized-keys
+        AuthorizedKeysCommandUser coolix
+        AuthenticationMethods publickey
+        ExposeAuthInfo yes
+        ForceCommand ${coolix}/bin/coolix ssh-serve
+        PermitTTY no
+        PermitUserRC no
+        DisableForwarding yes
+      Match all
+    '');
     users.groups.coolix = { };
 
     systemd.tmpfiles.rules = [

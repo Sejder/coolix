@@ -26,7 +26,7 @@ type appFlags struct {
 	healthPath, healthTimeout       *string
 	memoryMax, cpuQuota             *string
 	tasksMax, backupKeep            *int
-	backupSchedule, webhookBranch   *string
+	backupSchedule, branch          *string
 	domains, envs, unsetEnvs, paths multiFlag
 	dbs                             multiFlag
 }
@@ -43,7 +43,8 @@ func newAppFlags(name string) *appFlags {
 	f.tasksMax = f.fs.Int("tasks-max", 0, "process/thread limit (0: default)")
 	f.backupSchedule = f.fs.String("backup-schedule", "", "systemd calendar expression for postgres backups, e.g. daily (empty: on demand only)")
 	f.backupKeep = f.fs.Int("backup-keep", 0, "postgres backups to keep (default 7)")
-	f.webhookBranch = f.fs.String("webhook-branch", "", "only deploy webhook pushes to this branch")
+	f.branch = f.fs.String("branch", "", "branch whose pushes deploy the app, by webhook or git push (default: any; push apps: main)")
+	f.fs.StringVar(f.branch, "webhook-branch", "", "old name of --branch")
 	f.fs.Var(&f.paths, "path", "nixpkgs attribute to put on the app's PATH (repeatable; replaces existing; \"none\" clears)")
 	f.healthPath = f.fs.String("health-path", "", "HTTP path that returns < 400 when the app is ready (default: TCP check)")
 	f.healthTimeout = f.fs.String("health-timeout", "", "how long a new slot may take to become healthy (default 30s)")
@@ -111,11 +112,8 @@ func (f *appFlags) apply(app *appdef.App) error {
 			app.Backup = nil
 		}
 	}
-	if set["webhook-branch"] {
-		app.Webhook = nil
-		if *f.webhookBranch != "" {
-			app.Webhook = &appdef.Webhook{Branch: *f.webhookBranch}
-		}
+	if set["branch"] || set["webhook-branch"] {
+		app.Branch, app.Webhook = *f.branch, nil
 	}
 	if set["domain"] {
 		app.Domains = f.domains

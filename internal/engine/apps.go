@@ -77,6 +77,11 @@ func (e *Engine) save(app *appdef.App, msg string) error {
 	if err != nil {
 		return err
 	}
+	if app.Pushed() {
+		if err := e.initPushRepo(app.Name); err != nil {
+			return err
+		}
+	}
 	if err := appdef.Save(r.Dir, app); err != nil {
 		return err
 	}
@@ -104,6 +109,9 @@ func (e *Engine) RemoveApp(name string) error {
 		return err
 	}
 	if err := r.Commit("Remove app " + name); err != nil {
+		return err
+	}
+	if err := e.removePushRepo(name); err != nil {
 		return err
 	}
 	return e.DisableWebhook(name)

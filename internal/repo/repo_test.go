@@ -11,12 +11,14 @@ import (
 )
 
 func TestGenerateFlake(t *testing.T) {
-	r := &Repo{Nixpkgs: "/nix/store/aaa-source", Lib: "/nix/store/bbb-source", System: "x86_64-linux"}
+	r := &Repo{Nixpkgs: "/nix/store/aaa-source", Lib: "/nix/store/bbb-source", System: "x86_64-linux", GitDir: "/var/lib/coolix/git"}
 	no := false
 	got := r.GenerateFlake([]*appdef.App{
 		{Name: "blog", Source: "github:me/blog"},
 		{Name: "api", Source: "git+https://example.com/api.git", FollowNixpkgs: &no},
-	})
+		{Name: "shop", Source: "push", Branch: "prod"},
+		{Name: "new", Source: "push"},
+	}, []string{"new"})
 	for _, want := range []string{
 		`nixpkgs.url = "path:/nix/store/aaa-source";`,
 		`coolix.url = "path:/nix/store/bbb-source";`,
@@ -24,10 +26,15 @@ func TestGenerateFlake(t *testing.T) {
 		`app-blog.inputs.nixpkgs.follows = "nixpkgs";`,
 		`app-api.url = "git+https://example.com/api.git";`,
 		`system = "x86_64-linux";`,
+		`app-shop.url = "git+file:///var/lib/coolix/git/shop.git?ref=refs/heads/prod";`,
+		`skip = [ "new" ];`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, "app-new") {
+		t.Error("unpushed app got an input")
 	}
 	if strings.Contains(got, "app-api.inputs.nixpkgs.follows") {
 		t.Error("api opted out of following nixpkgs")

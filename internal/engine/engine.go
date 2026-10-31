@@ -50,6 +50,9 @@ type Config struct {
 	AllowedHardening []string
 	// DefaultResources apply to apps without their own limits.
 	DefaultResources units.Resources
+	// GitHost and GitPort are where `git push` reaches this host over SSH
+	// (empty: push deploys are off).
+	GitHost, GitPort string
 }
 
 func envOr(k, def string) string {
@@ -80,6 +83,8 @@ func ConfigFromEnv() (*Config, error) {
 		ControlSocket:    os.Getenv("COOLIX_CONTROL_SOCKET"),
 		ReservedDomains:  reservedDomains(os.Getenv("COOLIX_RESERVED_DOMAINS")),
 		DefaultResources: units.Resources{MemoryMax: os.Getenv("COOLIX_DEFAULT_MEMORY_MAX")},
+		GitHost:          os.Getenv("COOLIX_GIT_HOST"),
+		GitPort:          os.Getenv("COOLIX_GIT_PORT"),
 	}
 	var err error
 	ints := []struct {
@@ -110,8 +115,11 @@ func (c *Config) Repo() (*repo.Repo, error) {
 	if c.Nixpkgs == "" || c.Lib == "" || c.System == "" {
 		return nil, errors.New("COOLIX_NIXPKGS, COOLIX_LIB and COOLIX_SYSTEM must be set (the NixOS module's wrapper does this)")
 	}
-	return &repo.Repo{Dir: c.StateDir + "/repo", Nixpkgs: c.Nixpkgs, Lib: c.Lib, System: c.System}, nil
+	return &repo.Repo{Dir: c.StateDir + "/repo", Nixpkgs: c.Nixpkgs, Lib: c.Lib, System: c.System, GitDir: c.GitDir()}, nil
 }
+
+// GitDir holds the bare repos of push apps.
+func (c *Config) GitDir() string { return c.StateDir + "/git" }
 
 func (c *Config) PendingDir() string { return c.StateDir + "/secrets-pending" }
 

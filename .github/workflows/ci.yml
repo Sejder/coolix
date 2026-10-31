@@ -35,7 +35,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        check: [vm-basic, vm-data, vm-ui]
+        check: [vm-basic, vm-data, vm-ui, vm-git]
     steps:
       - uses: actions/checkout@v7
       - name: Enable KVM

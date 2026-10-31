@@ -14,7 +14,7 @@ buildGo127Module {
     ];
   };
 
-  vendorHash = "sha256-5fiaqb9clbLHhSKPprL8ePcoDeB/hK3dS1sn+lIcLAE=";
+  vendorHash = "sha256-d18zKAbX+DJcGY9q7sOFsW6enQf0neA93wYOSZJFNf4=";
   subPackages = [ "cmd/coolix" ];
 
   meta = {

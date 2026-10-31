@@ -19,6 +19,9 @@ All options live under `services.coolix`.
 | `caddy.tls` | `"acme"` | `acme` (automatic HTTPS), `internal` (Caddy's local CA) or `off` (plain HTTP). |
 | `caddy.acmeEmail` | `null` | Contact email for ACME. |
 | `caddy.openFirewall` | `false` | Open ports 80 and 443. |
+| `git.enable` | `false` | Deploy push apps (`source = "push"`) with `git push coolix@host:APP`. Needs `services.openssh`. Logins of the `coolix` user can only push and fetch: sshd forces `coolix ssh-serve`, with no terminal and no forwarding. |
+| `git.host` / `git.port` | `ui.domain` or the host name / the first `services.openssh.ports` | Shown in push remotes. |
+| `git.authorizedKeys` | `[]` | SSH public keys that may push to every push app. More can be added in the UI or with `coolix ssh-key add`. |
 | `ui.enable` | `true` | Run the web UI. |
 | `ui.listen` | `null` | TCP address for the UI. By default it listens on `/run/coolix/ui.sock`, which only Caddy and root can open (apps share the host network); without Caddy, `127.0.0.1:8090`. Over SSH: `ssh -L 8090:/run/coolix/ui.sock host`, then `http://localhost:8090` (passkeys work there too). |
 | `ui.domain` | `null` | Serve the UI through Caddy on this domain. Passkeys work there (over HTTPS) and on `http://localhost:<port>`. |

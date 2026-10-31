@@ -37,5 +37,28 @@
     <form method="post" action="/account/password/delete" hx-confirm="Remove the password? You'll sign in with a passkey only."><button class="link danger">Remove password</button></form>
     {{end}}
   </section>
+
+  <section class="card form">
+    <h2>SSH keys</h2>
+    {{if .GitHost}}
+    <p class="muted small">These keys can <code>git push</code> to apps whose source is <code>push</code>, which deploys them. They can't open a shell.</p>
+    {{else}}
+    <p class="muted small">Push deploys are off on this host (<code>services.coolix.git.enable</code>). Keys added here work once they're on.</p>
+    {{end}}
+    <ul class="secrets">
+      {{range .SSHKeys}}
+      <li><span>{{.Name}} <span class="muted small"><code>{{.Fingerprint}}</code> · added {{ago .Added}}</span></span>
+        <form method="post" action="/account/ssh-keys/{{.Name}}/delete" hx-confirm="Remove SSH key {{.Name}}?"><button class="link danger">Remove</button></form></li>
+      {{else}}
+      <li class="muted">No SSH keys added here{{if .GitHost}} (keys declared in <code>services.coolix.git.authorizedKeys</code> also work){{end}}.</li>
+      {{end}}
+    </ul>
+    <form method="post" action="/account/ssh-keys">
+      <label>Public key <small>e.g. the contents of <code>~/.ssh/id_ed25519.pub</code></small>
+        <textarea name="key" rows="3" required spellcheck="false" placeholder="ssh-ed25519 AAAA… you@laptop"></textarea></label>
+      <label>Name <small>default: the key's comment</small><input name="name" maxlength="64" spellcheck="false" placeholder="laptop"></label>
+      <div class="formactions"><button>Add SSH key</button></div>
+    </form>
+  </section>
 </div>
 {{end}}

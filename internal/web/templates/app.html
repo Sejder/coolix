@@ -39,6 +39,19 @@
       </form>
     </section>
 
+    {{if .App.Pushed}}
+    <section class="card">
+      <h2>Push to deploy</h2>
+      {{if .PushRemote}}
+      <p class="small">{{if .Unpushed}}Nothing pushed yet. {{end}}Pushes to <code>{{.App.DeployBranch}}</code> build and deploy this app:</p>
+      <pre class="command"><code>git remote add coolix {{.PushRemote}}
+git push coolix {{.App.DeployBranch}}</code></pre>
+      <p class="muted small">With an SSH key from your <a href="/account">account</a> or <code>services.coolix.git.authorizedKeys</code>.</p>
+      {{else}}
+      <p class="muted small">Push deploys are off on this host. Turn them on with <code>services.coolix.git.enable</code>.</p>
+      {{end}}
+    </section>
+    {{else}}
     <section class="card">
       <h2>Deploy webhook</h2>
       {{if .NewWebhookToken}}
@@ -49,7 +62,7 @@
       </dl>
       <p class="muted small">GitHub, Gitea, Forgejo: content type <code>application/json</code>, this secret, push events. GitLab: secret token. Anything else: <code>Authorization: Bearer &lt;secret&gt;</code>.</p>
       {{else if .Webhook}}
-      <p class="small"><span class="pill job-succeeded">on</span> Pushes{{with .App.WebhookBranch}} to <code>{{.}}</code>{{end}} to <code>{{.WebhookURL}}</code> deploy this app.</p>
+      <p class="small"><span class="pill job-succeeded">on</span> Pushes{{with .App.DeployBranch}} to <code>{{.}}</code>{{end}} to <code>{{.WebhookURL}}</code> deploy this app.</p>
       {{else}}
       <p class="muted small">Deploy automatically when you push: your forge calls a signed URL on this server.</p>
       {{end}}
@@ -59,6 +72,7 @@
         {{if .Webhook}}<form method="post" action="/apps/{{.App.Name}}/webhook"><input type="hidden" name="action" value="disable"><button class="link danger">Disable</button></form>{{end}}
       </div>
     </section>
+    {{end}}
 
     {{if hasDB .App "postgres"}}
     <section class="card">

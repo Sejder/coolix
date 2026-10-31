@@ -35,7 +35,7 @@ func TestValidateRejects(t *testing.T) {
 		"pre_start abs":    func(a *App) { a.PreStart = "/bin/sh" },
 		"backup no pg":     func(a *App) { a.Backup = &Backup{Schedule: "daily"} },
 		"memory":           func(a *App) { a.Resources = &Resources{MemoryMax: "lots"} },
-		"branch":           func(a *App) { a.Webhook = &Webhook{Branch: "a..b"} },
+		"branch":           func(a *App) { a.Branch = "a..b" },
 		"path env":         func(a *App) { a.Env = map[string]string{"PATH": "/tmp"} },
 		"long name":        func(a *App) { a.Name = "a-twenty-one-chars-xx" },
 		"dot command":      func(a *App) { a.Command = "./bin/x" },

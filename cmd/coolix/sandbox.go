@@ -29,6 +29,8 @@ var sandboxCommands = map[string]func(ctx context.Context, args []string) error{
 	"db-backup":   dbBackup,
 	"db-restore":  dbRestore,
 	"query-serve": queryServe,
+	// sshd's AuthorizedKeysCommand, also without coolix's environment.
+	"ssh-authorized-keys": sshAuthorizedKeys,
 }
 
 // execApp sets the slot's PORT, loads secrets from the unit's credential and

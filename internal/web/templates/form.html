@@ -1,5 +1,5 @@
 {{define "appfields"}}
-<label>Source <small>flake reference</small>
+<label>Source <small>a flake reference, or <code>push</code> to deploy with <code>git push</code></small>
   <input name="source" value="{{.Source}}" placeholder="github:you/app" required spellcheck="false"></label>
 <label>Domains <small>one per line, routed through Caddy with automatic HTTPS</small>
   <textarea name="domains" rows="2" spellcheck="false" placeholder="app.example.com">{{join .Domains "\n"}}</textarea></label>
@@ -22,7 +22,7 @@
 {{template "advancedfields" .}}
 {{end}}
 {{define "advancedfields"}}
-<details class="advanced" {{if or .PreStart .Path .Resources .Backup .Webhook}}open{{end}}>
+<details class="advanced" {{if or .PreStart .Path .Resources .Backup .Branch}}open{{end}}>
   <summary>Advanced</summary>
   <div class="row">
     <label>Pre-start command <small>runs before each start, e.g. migrations</small>
@@ -41,7 +41,7 @@
   <div class="row three">
     <label>Backup schedule <small>postgres only</small><input name="backup_schedule" value="{{with .Backup}}{{.Schedule}}{{end}}" placeholder="daily" spellcheck="false"></label>
     <label>Backups to keep<input name="backup_keep" value="{{with .Backup}}{{if .Keep}}{{.Keep}}{{end}}{{end}}" placeholder="7" inputmode="numeric"></label>
-    <label>Webhook branch <small>default: any</small><input name="webhook_branch" value="{{with .Webhook}}{{.Branch}}{{end}}" placeholder="main" spellcheck="false"></label>
+    <label>Deploy branch <small>webhooks and git push</small><input name="branch" value="{{.Branch}}" placeholder="{{if .Pushed}}main{{else}}any{{end}}" spellcheck="false"></label>
   </div>
 </details>
 {{end}}

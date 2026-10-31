@@ -7,7 +7,9 @@ validates the result again before activating it.
 
 ```toml
 name = "blog"                       # must match the directory; 2-20 chars of a-z, 0-9, -
-source = "github:you/blog"          # any flake reference
+source = "github:you/blog"          # any flake reference, or "push" (see below)
+branch = "main"                     # pushes to this branch deploy, by webhook or git push
+                                    # (default: any branch for webhooks; main for push apps)
 package = "default"                 # packages.<system>.<package>; default "default"
 command = "bin/blog"                # path inside the package; default: meta.mainProgram
 pre_start = "bin/migrate"           # path inside the package, run before every start of a slot
@@ -41,9 +43,6 @@ tasks_max = 256                     # TasksMax: processes + threads
 [backup]                            # postgres only; on-demand backups work without this
 schedule = "daily"                  # systemd calendar expression, e.g. "*-*-* 03:00"
 keep = 7                            # newest dumps to keep (default 7)
-
-[webhook]
-branch = "main"                     # only pushes to this branch deploy (default: any)
 
 [hardening]                         # relax individual sandbox settings
 MemoryDenyWriteExecute = false      # e.g. for JIT runtimes (Node, Java, .NET)
@@ -84,3 +83,23 @@ Earlier versions merged `apps/<name>/override.nix` into the unit. Units are
 now rendered by root from validated data, so arbitrary unit settings aren't
 possible, and a deploy fails with a message if the file exists. Use `path`,
 `pre_start`, `[resources]` and `[hardening]` instead.
+
+## Push apps
+
+With `source = "push"`, the app's code is whatever you `git push` to the
+host (with `services.coolix.git.enable`):
+
+```sh
+coolix app add blog --source push --domain blog.example.com
+git remote add coolix coolix@your-host:blog
+git push coolix main          # builds and deploys, with the output in your terminal
+```
+
+The repo must contain a flake exposing `packages.<system>.default`, like any
+other source. Pushes to other branches are stored but don't deploy. SSH keys
+come from `services.coolix.git.authorizedKeys`, the account page in the UI,
+or `coolix ssh-key add`. The pushed code lives in
+`/var/lib/coolix/git/<name>.git`, and is deleted with the app.
+
+The older `[webhook] branch = "..."` still works, and becomes `branch` the
+next time coolix saves the app.

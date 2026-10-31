@@ -4,13 +4,14 @@
   # Turn a coolix apps repo (apps/<name>/app.toml) into an app profile whose
   # only content is $out/apps.json: the apps' store paths and settings. It
   # references every package, so the profile's generations keep them alive.
-  mkAppProfile = { inputs, root, system }:
+  # Apps in skip (push apps with nothing pushed yet) are left out.
+  mkAppProfile = { inputs, root, system, skip ? [ ] }:
     let
       pkgs = inputs.nixpkgs.legacyPackages.${system};
       appsDir = root + "/apps";
       entries = if builtins.pathExists appsDir then builtins.readDir appsDir else { };
       names = lib.attrNames (lib.filterAttrs
-        (n: t: t == "directory" && builtins.pathExists (appsDir + "/${n}/app.toml"))
+        (n: t: t == "directory" && !(builtins.elem n skip) && builtins.pathExists (appsDir + "/${n}/app.toml"))
         entries);
 
       apps = lib.genAttrs names (name: (import ./app.nix {

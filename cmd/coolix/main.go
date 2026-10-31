@@ -31,7 +31,7 @@ commands:
                                --health-path, --health-timeout, --package, --command, --pre-start, --pre-start-timeout,
                                --path ATTR (repeatable), --memory-max, --cpu-quota, --tasks-max,
                                --db postgres[:VERSION] / --db redis / --db none,
-                               --backup-schedule, --backup-keep, --webhook-branch
+                               --backup-schedule, --backup-keep, --branch
   app rm NAME                  remove an app (applied on next deploy)
   app list                     list apps
   secret set APP KEY           set a secret (value read from stdin; applied on next deploy)
@@ -48,6 +48,9 @@ commands:
   webhook enable APP           create (or rotate) the app's deploy webhook token and print it
   webhook show APP             print the webhook URL path and token
   webhook disable APP          turn the app's webhook off
+  ssh-key add [NAME] < KEY     allow an SSH public key to git push (push apps: --source push)
+  ssh-key list                 list the SSH keys added here (keys from NixOS aren't shown)
+  ssh-key rm NAME              remove an SSH key
   serve                        run the web UI
   setup-code                   print a one-time code to create the UI's admin account
   account reset                remove the admin's password and passkeys (then use setup-code)
@@ -59,6 +62,8 @@ internal (run by systemd):
   exec-app, db-init, db-createdb, db-backup, db-restore
                                helpers inside app and database units (app user)
   query-serve                  answer one coolix-query connection
+  ssh-serve                    answer git push/fetch over SSH (sshd's ForceCommand)
+  ssh-authorized-keys DIR      print the SSH keys added here (sshd's AuthorizedKeysCommand)
 `
 
 func logf(format string, args ...any) { fmt.Fprintf(os.Stderr, "coolix: "+format+"\n", args...) }
@@ -116,6 +121,10 @@ func run(ctx context.Context, args []string) error {
 		return runDB(ctx, e, args[1:])
 	case "webhook":
 		return runWebhook(e, args[1:])
+	case "ssh-key":
+		return runSSHKey(e, args[1:])
+	case "ssh-serve":
+		return sshServe(ctx, e)
 	case "rollback":
 		if len(args) > 2 {
 			return errors.New("usage: coolix rollback [GEN]")

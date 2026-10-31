@@ -39,8 +39,9 @@ deployed is recorded in a git repo.
 - **Passkeys.** Sign in with Touch ID, Windows Hello, a phone or a security key,
   a password, or both. A fresh install can only be claimed with a code from
   the server itself.
-- **Deploy on push.** Each app can get a signed webhook URL for GitHub,
-  Gitea, Forgejo, GitLab or any CI job.
+- **Deploy on push.** `git push coolix@host:app main` builds and deploys,
+  Heroku-style. Or keep the code on your forge, and give it a signed webhook
+  URL (GitHub, Gitea, Forgejo, GitLab or any CI job).
 - **Database backups.** Scheduled or on-demand `pg_dump`s with retention, and
   restores from the UI or CLI.
 - **Resource limits, migrations, runtime packages.** Memory, CPU and task
@@ -111,7 +112,7 @@ coolix app set NAME [flags]                change it: --source, --domain, --env 
                                            --health-path, --health-timeout, --package, --command,
                                            --pre-start, --pre-start-timeout, --path ATTR, --memory-max, --cpu-quota,
                                            --tasks-max, --db postgres[:VERSION] / --db redis / --db none,
-                                           --backup-schedule, --backup-keep, --webhook-branch
+                                           --backup-schedule, --backup-keep, --branch
 coolix app rm NAME                         remove it (applied on next deploy)
 coolix app list
 coolix secret set APP KEY < value          set a secret (applied on next deploy)
@@ -126,6 +127,7 @@ coolix db backup APP                       dump the app's postgres database now
 coolix db backups APP                      list its dumps
 coolix db restore APP BACKUP               replace the database's contents with a dump
 coolix webhook enable|show|disable APP     manage the app's deploy webhook
+coolix ssh-key add [NAME] < key.pub        allow a key to git push (also: ssh-key list, ssh-key rm NAME)
 coolix setup-code                          one-time code to create the UI's admin account
 coolix account reset                       remove the admin's password and passkeys (lost access)
 ```
@@ -168,5 +170,5 @@ CI runs the same commands on GitHub Actions, with KVM for the VM tests.
 
 ## Not yet
 
-`git push` deploys, PR preview environments, off-host backups, multiple
-users, and multi-host deployments.
+PR preview environments, off-host backups, multiple users, and multi-host
+deployments.

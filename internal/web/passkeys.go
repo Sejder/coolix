@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"slices"
@@ -114,7 +115,14 @@ func (s *Server) rp(r *http.Request) (id, origin string, err error) {
 	}
 	origin = r.Header.Get("Origin")
 	if !slices.Contains(s.WebAuthnOrigins, origin) {
-		return "", "", errors.New("passkeys work only on " + strings.Join(s.WebAuthnOrigins, " or "))
+		// Browsers don't allow passkeys on IP addresses, so 127.0.0.1 can't
+		// be added: name what the page was opened as.
+		seen := origin
+		if seen == "" {
+			seen = "an unknown origin (no Origin header)"
+		}
+		return "", "", fmt.Errorf("this page is open on %s, but passkeys work only on %s; open the UI there instead",
+			seen, strings.Join(s.WebAuthnOrigins, " or "))
 	}
 	u, err := url.Parse(origin)
 	if err != nil {

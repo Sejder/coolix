@@ -93,8 +93,18 @@ func (e *Engine) prepare(ctx context.Context, app string) (string, error) {
 			return "", err
 		}
 		if app != "" {
-			if _, err := os.Stat(appdef.Path(r.Dir, app)); err != nil {
+			a, err := appdef.Load(appdef.Path(r.Dir, app))
+			if errors.Is(err, os.ErrNotExist) {
 				return "", fmt.Errorf("app %q does not exist", app)
+			} else if err != nil {
+				return "", err
+			}
+			if a.Pushed() && len(r.Unpushed([]*appdef.App{a})) > 0 {
+				how := "git push"
+				if remote := e.PushRemote(app); remote != "" {
+					how = "git push " + remote
+				}
+				return "", fmt.Errorf("nothing pushed to %s yet; deploy it with: %s %s", a.DeployBranch(), how, a.DeployBranch())
 			}
 		}
 		// Regenerate so host upgrades (new nixpkgs/coolix store paths) are picked up.

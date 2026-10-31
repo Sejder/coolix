@@ -181,6 +181,8 @@ func (s *Server) Handler() (http.Handler, error) {
 	auth.HandleFunc("POST /account/passkeys/begin", s.handlePasskeyRegisterBegin)
 	auth.HandleFunc("POST /account/passkeys/finish", s.handlePasskeyRegisterFinish)
 	auth.HandleFunc("POST /account/passkeys/{id}/delete", s.handleRemovePasskey)
+	auth.HandleFunc("POST /account/ssh-keys", s.handleAddSSHKey)
+	auth.HandleFunc("POST /account/ssh-keys/{name}/delete", s.handleRemoveSSHKey)
 	auth.HandleFunc("POST /generations/{n}/rollback", s.handleRollback)
 	mux.Handle("/", s.requireAuth(auth))
 
@@ -344,6 +346,14 @@ func (s *Server) appData(r *http.Request, name string) (map[string]any, error) {
 		"Jobs":       s.Jobs.Recent(5, name),
 		"Webhook":    token != "",
 		"WebhookURL": webhookURL(r, name),
+		"PushRemote": s.Config.PushRemote(name),
+	}
+	if app.Pushed() {
+		repo, err := e.Repo()
+		if err != nil {
+			return nil, err
+		}
+		data["Unpushed"] = len(repo.Unpushed([]*appdef.App{app})) > 0
 	}
 	// Polls only refresh the status and the job list; skip the backup query.
 	if app.HasDatabase("postgres") && r.URL.Query().Get("poll") == "" {
@@ -602,9 +612,9 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusAccepted)
 		fmt.Fprintf(w, "{\"status\":\"ignored\",\"reason\":%q}\n", "event "+d.Event)
 		return
-	case !d.Matches(app.WebhookBranch()):
+	case !d.Matches(app.DeployBranch()):
 		w.WriteHeader(http.StatusAccepted)
-		fmt.Fprintf(w, "{\"status\":\"ignored\",\"reason\":%q}\n", d.Ref+" is not "+app.WebhookBranch())
+		fmt.Fprintf(w, "{\"status\":\"ignored\",\"reason\":%q}\n", d.Ref+" is not "+app.DeployBranch())
 		return
 	}
 	// A deploy that hasn't started yet will pick up this push too, so
@@ -754,10 +764,7 @@ func applyForm(app *appdef.App, r *http.Request) error {
 		app.Backup = &backup
 	}
 
-	app.Webhook = nil
-	if b := strings.TrimSpace(r.FormValue("webhook_branch")); b != "" {
-		app.Webhook = &appdef.Webhook{Branch: b}
-	}
+	app.Branch, app.Webhook = strings.TrimSpace(r.FormValue("branch")), nil
 
 	app.Databases = nil
 	if r.FormValue("db_postgres") != "" {

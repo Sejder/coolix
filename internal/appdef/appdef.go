@@ -44,15 +44,25 @@ type Backup struct {
 	Keep     int    `toml:"keep,omitempty"`
 }
 
-// Webhook settings; the token itself lives outside the repo.
+// Webhook is the old place of Branch ([webhook] branch); Normalize moves it.
 type Webhook struct {
-	// Branch limits deploys to pushes to this branch ("" deploys on any push).
 	Branch string `toml:"branch,omitempty"`
 }
 
+// PushSource is the source of apps deployed with `git push` to coolix: their
+// code lives in a bare repo on the host (<stateDir>/git/<name>.git).
+const PushSource = "push"
+
+// DefaultPushBranch is the branch whose pushes deploy a push app by default.
+const DefaultPushBranch = "main"
+
 type App struct {
-	Name    string `toml:"name"`
-	Source  string `toml:"source"`
+	Name string `toml:"name"`
+	// Source is a flake reference, or "push" for apps deployed by git push.
+	Source string `toml:"source"`
+	// Branch is the branch whose pushes deploy the app, by webhook or git
+	// push ("" means any branch for webhooks, main for push apps).
+	Branch  string `toml:"branch,omitempty"`
 	Package string `toml:"package,omitempty"`
 	Command string `toml:"command,omitempty"`
 	// PreStart runs (from the package, with the app's environment) before
@@ -86,8 +96,18 @@ func (a *App) HasDatabase(kind string) bool {
 	return false
 }
 
-// WebhookBranch returns the branch webhook deploys are limited to.
-func (a *App) WebhookBranch() string {
+// Pushed reports whether the app is deployed by git push to coolix.
+func (a *App) Pushed() bool { return a.Source == PushSource }
+
+// DeployBranch returns the branch whose pushes deploy the app ("" for any).
+func (a *App) DeployBranch() string {
+	if a.Branch == "" && a.Pushed() {
+		return DefaultPushBranch
+	}
+	return a.Branch
+}
+
+func (a *App) webhookBranch() string {
 	if a.Webhook == nil {
 		return ""
 	}
@@ -112,11 +132,25 @@ func validCommand(c string) bool {
 	return commandRe.MatchString(c) && units.CleanRelative(c) && !strings.Contains(c, "..")
 }
 
-// Normalize drops settings that no longer apply: backups need postgres.
+// Normalize drops settings that no longer apply (backups need postgres) and
+// moves old ones to their new place.
 func (a *App) Normalize() {
 	if !a.HasDatabase("postgres") {
 		a.Backup = nil
 	}
+	if a.Webhook != nil {
+		if a.Branch == "" {
+			a.Branch = a.Webhook.Branch
+		}
+		a.Webhook = nil
+	}
+}
+
+// ValidBranch reports whether b is a branch name coolix accepts.
+func ValidBranch(b string) bool {
+	return branchRe.MatchString(b) && !strings.Contains(b, "..") && !strings.Contains(b, "//") &&
+		!strings.HasPrefix(b, "-") && !strings.HasPrefix(b, "/") && !strings.HasSuffix(b, "/") &&
+		!strings.HasPrefix(b, ".") && !strings.HasSuffix(b, ".") && !strings.HasSuffix(b, ".lock")
 }
 
 // Validate checks everything that ends up interpolated into flake.nix or the
@@ -207,8 +241,10 @@ func (a *App) Validate() error {
 			errs = append(errs, err)
 		}
 	}
-	if b := a.WebhookBranch(); b != "" && (!branchRe.MatchString(b) || strings.Contains(b, "..")) {
-		errs = append(errs, fmt.Errorf("webhook branch %q: invalid branch name", b))
+	for _, b := range []string{a.Branch, a.webhookBranch()} {
+		if b != "" && !ValidBranch(b) {
+			errs = append(errs, fmt.Errorf("branch %q: invalid branch name", b))
+		}
 	}
 	if err := units.CheckHardening(a.Hardening); err != nil {
 		errs = append(errs, err)
@@ -229,6 +265,7 @@ func Load(path string) (*App, error) {
 	if und := md.Undecoded(); len(und) > 0 {
 		return nil, fmt.Errorf("%s: unknown keys %v", path, und)
 	}
+	a.Normalize()
 	if want := filepath.Base(filepath.Dir(path)); a.Name != want {
 		return nil, fmt.Errorf("%s: name %q does not match directory %q", path, a.Name, want)
 	}

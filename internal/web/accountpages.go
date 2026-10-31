@@ -77,9 +77,16 @@ func (s *Server) handleAccount(w http.ResponseWriter, r *http.Request) {
 		s.errorPage(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
+	keys, err := s.Config.SSHKeys().List()
+	if err != nil {
+		s.errorPage(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
 	s.render(w, r, "account", map[string]any{
 		"Title":        "Account",
 		"Account":      a,
+		"SSHKeys":      keys,
+		"GitHost":      s.Config.GitHost,
 		"PasswordFile": s.PasswordFile != "",
 		"Passkeys":     s.webauthn != nil,
 		"Origins":      strings.Join(s.WebAuthnOrigins, ", "),
@@ -186,3 +193,26 @@ func (s *Server) credentialChangeAllowed(r *http.Request) bool {
 }
 
 const errNotRecent = "For your security, sign out and back in (within 15 minutes) to change how you sign in."
+
+// SSH keys may push (deploy) code, so like credentials they need a recent
+// sign-in: a stolen session can't leave a key behind.
+func (s *Server) handleAddSSHKey(w http.ResponseWriter, r *http.Request) {
+	if !s.credentialChangeAllowed(r) {
+		s.redirect(w, r, "/account", errNotRecent)
+		return
+	}
+	k, err := s.Config.SSHKeys().Add(r.FormValue("name"), r.FormValue("key"))
+	if err != nil {
+		s.redirect(w, r, "/account", "SSH key not added: "+err.Error())
+		return
+	}
+	s.redirect(w, r, "/account", "SSH key "+k.Name+" added.")
+}
+
+func (s *Server) handleRemoveSSHKey(w http.ResponseWriter, r *http.Request) {
+	if err := s.Config.SSHKeys().Remove(r.PathValue("name")); err != nil {
+		s.redirect(w, r, "/account", err.Error())
+		return
+	}
+	s.redirect(w, r, "/account", "SSH key removed.")
+}

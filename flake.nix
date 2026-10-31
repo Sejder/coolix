@@ -53,6 +53,7 @@
           vm-basic = pkgs.testers.runNixOSTest (import ./tests/basic.nix { inherit self; });
           vm-data = pkgs.testers.runNixOSTest (import ./tests/data.nix { inherit self; });
           vm-ui = pkgs.testers.runNixOSTest (import ./tests/ui.nix { inherit self; });
+          vm-git = pkgs.testers.runNixOSTest (import ./tests/git.nix { inherit self; });
         });
     };
 }
