@@ -85,12 +85,31 @@ d.find_element(By.CSS_SELECTOR, "[data-passkey-login]").click()
 wait.until(ec.presence_of_element_located((By.CSS_SELECTOR, "table.apps")))
 print("signed in with a passkey")
 
+# Links and buttons inside the live-refreshing regions navigate normally
+# (htmx must not apply the region's hx-select/hx-swap to them).
+time.sleep(6)  # let one refresh happen first
+d.find_element(By.CSS_SELECTOR, "#live a.appname[href='/apps/docs']").click()
+wait.until(lambda d: d.current_url.endswith("/apps/docs") and "Settings" in text("main"))
+assert d.find_elements(By.CSS_SELECTOR, "#appjobs"), "app page incomplete after clicking through #live"
+d.find_element(By.CSS_SELECTOR, ".topbar nav a[href='/']").click()
+wait.until(ec.presence_of_element_located((By.CSS_SELECTOR, "#live table.apps")))
+# A form inside the region: the row's Deploy button.
+d.find_element(By.CSS_SELECTOR, "#live form[action='/apps/docs/deploy'] button").click()
+wait.until(lambda d: "/jobs/" in d.current_url)
+wait.until(ec.text_to_be_present_in_element((By.CSS_SELECTOR, "[data-job-state]"), "succeeded"))
+print("clicked through the live regions")
+
 # Deploy hello from the UI and wait for the live log to finish.
 d.get(base + "/apps/hello")
 d.find_element(By.CSS_SELECTOR, ".pagehead button.primary").click()
 wait.until(ec.text_to_be_present_in_element((By.CSS_SELECTOR, "[data-job-state]"), "succeeded"))
 log = d.find_element(By.CSS_SELECTOR, "pre.log").text
 assert "hello: stopping blue slot" in log, "activation output missing from the job log:\n" + log
+# The job is listed in the app page's live job list; open it from there.
+d.get(base + "/apps/hello")
+wait.until(ec.presence_of_element_located((By.CSS_SELECTOR, "#appjobs .jobs a")))
+d.find_element(By.CSS_SELECTOR, "#appjobs .jobs a").click()
+wait.until(lambda d: "/jobs/" in d.current_url and "stopping blue slot" in text("pre.log"))
 shot("deploy", height=820)
 
 d.get(base + "/")

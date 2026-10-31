@@ -1,6 +1,8 @@
 package web
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -13,6 +15,8 @@ import (
 
 	"coolix/internal/appdef"
 	"coolix/internal/engine"
+
+	"github.com/go-webauthn/webauthn/webauthn"
 )
 
 func newTestServer(t *testing.T) (*httptest.Server, *http.Client) {
@@ -76,7 +80,7 @@ func TestAuthAndPages(t *testing.T) {
 	resp.Body.Close()
 
 	resp, _ = c.PostForm(srv.URL+"/login", url.Values{"password": {"hunter2"}})
-	if b := body(t, resp); !strings.Contains(b, "Nothing deployed yet") {
+	if b := body(t, resp); !strings.Contains(b, "No apps yet") {
 		t.Fatalf("dashboard after login:\n%s", b)
 	}
 
@@ -130,7 +134,7 @@ func TestCrossOriginPostRejected(t *testing.T) {
 func TestForgedSessionRejected(t *testing.T) {
 	srv, _ := newTestServer(t)
 	req, _ := http.NewRequest("GET", srv.URL+"/", nil)
-	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: "99999999999.forged"})
+	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "99999999999.forged"})
 	resp, err := (&http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -230,12 +234,19 @@ func TestClientIP(t *testing.T) {
 	r := httptest.NewRequest("POST", "/login", nil)
 	r.RemoteAddr = "127.0.0.1:5555"
 	r.Header.Set("X-Forwarded-For", "6.6.6.6, 1.2.3.4")
-	if got := clientIP(r); got != "1.2.3.4" {
-		t.Fatalf("behind proxy: %s", got)
+	// Over TCP (an app on the same host could connect), XFF is ignored.
+	if got := clientIP(r); got != "127.0.0.1" {
+		t.Fatalf("XFF trusted over TCP: %s", got)
 	}
-	r.RemoteAddr = "9.9.9.9:5555"
-	if got := clientIP(r); got != "9.9.9.9" {
-		t.Fatalf("direct client may not spoof X-Forwarded-For: %s", got)
+	// Through the unix socket only Caddy can open, the last entry counts.
+	r = r.WithContext(context.WithValue(r.Context(), viaSocket, true))
+	r.RemoteAddr = "@"
+	if got := clientIP(r); got != "1.2.3.4" {
+		t.Fatalf("behind Caddy: %s", got)
+	}
+	r.Header.Set("X-Forwarded-For", "2001:db8:1:2:3:4:5:6")
+	if got := clientIP(r); got != "2001:db8:1:2::/64" {
+		t.Fatalf("IPv6 per /64: %s", got)
 	}
 }
 
@@ -295,7 +306,7 @@ func TestSetupFlow(t *testing.T) {
 	// The password works; removing it is refused (it's the only credential).
 	c2 := &http.Client{Jar: other}
 	resp, _ = c2.PostForm(srv.URL+"/login", url.Values{"password": {pw}})
-	if b := body(t, resp); !strings.Contains(b, "Nothing deployed yet") {
+	if b := body(t, resp); !strings.Contains(b, "No apps yet") {
 		t.Fatal("login with the account password failed")
 	}
 	resp, _ = c2.PostForm(srv.URL+"/account/password/delete", nil)
@@ -332,5 +343,46 @@ func TestPasskeyEndpointsCheckOrigin(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode == http.StatusOK {
 		t.Fatal("passkey ceremony started for a foreign origin")
+	}
+}
+
+func TestCeremoniesEvictInsteadOfRefusing(t *testing.T) {
+	var c ceremonies
+	var admin string
+	for i := range maxCeremonies + 50 {
+		client := fmt.Sprintf("10.0.%d.%d", i/250, i%250)
+		tok, err := c.put("login", client, &webauthn.SessionData{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == maxCeremonies+49 {
+			admin = tok
+		}
+	}
+	if _, ok := c.take("login", admin); !ok {
+		t.Fatal("the newest ceremony must survive a flood")
+	}
+	for range 20 {
+		c.put("login", "6.6.6.6", &webauthn.SessionData{})
+	}
+	n := 0
+	for _, v := range c.m {
+		if v.client == "6.6.6.6" {
+			n++
+		}
+	}
+	if n > maxCeremoniesPerClient {
+		t.Fatalf("one client holds %d ceremonies", n)
+	}
+}
+
+func TestSaveRejectsDuplicateDomain(t *testing.T) {
+	_, _, e := newTestServerWithEngine(t)
+	if err := e.CreateApp(&appdef.App{Name: "zeta", Source: "github:me/z", Domains: []string{"x.example.com"}}); err != nil {
+		t.Fatal(err)
+	}
+	err := e.CreateApp(&appdef.App{Name: "alpha", Source: "github:me/a", Domains: []string{"X.example.com"}})
+	if err == nil || !strings.Contains(err.Error(), "already used by zeta") {
+		t.Fatalf("got %v", err)
 	}
 }

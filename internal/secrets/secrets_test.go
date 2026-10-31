@@ -124,3 +124,38 @@ func TestApplyRefusesSymlinks(t *testing.T) {
 		t.Fatal("credential written from a symlink")
 	}
 }
+
+func TestApplyClaimsAndMarksRestart(t *testing.T) {
+	ctx := context.Background()
+	s := fakeStore(t)
+	pending := t.TempDir()
+	if err := AddPending(pending, "blog", map[string]string{"A": "1"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	// A failed earlier run left a claimed file behind.
+	os.Rename(filepath.Join(pending, "blog.json"), filepath.Join(pending, "blog.json.applying"))
+	AddPending(pending, "blog", map[string]string{"B": "2"}, nil)
+
+	changed, err := s.Apply(ctx, pending, []string{"blog"}, nil)
+	if err != nil || !changed["blog"] {
+		t.Fatalf("%v %v", changed, err)
+	}
+	if !s.Restarts([]string{"blog"})["blog"] {
+		t.Fatal("restart marker missing")
+	}
+	// The newer change was not lost: it's applied by the next run.
+	if _, err := os.Stat(filepath.Join(pending, "blog.json")); err != nil {
+		t.Fatal("new pending change was consumed with the leftover")
+	}
+	if _, err := s.Apply(ctx, pending, []string{"blog"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	vars, _ := s.read(ctx, "blog")
+	if vars["A"] != "1" || vars["B"] != "2" {
+		t.Fatalf("got %v", vars)
+	}
+	s.ClearRestart("blog")
+	if s.Restarts([]string{"blog"})["blog"] {
+		t.Fatal("marker not cleared")
+	}
+}

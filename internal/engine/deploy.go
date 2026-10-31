@@ -245,9 +245,17 @@ func (e *Engine) runUnit(ctx context.Context, unit string) error {
 			fmt.Sprintf("--since=@%d", since), "--unit="+unit)
 	}()
 	out, err := exec.CommandContext(ctx, "systemctl", "start", unit).CombinedOutput()
-	// Wait for journald to deliver the rest: until 1s without output, at most 10s.
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) && time.Since(qw.lastWrite()) < time.Second {
+	finished := time.Now()
+	// Wait for journald to deliver the rest: until 1s without output since
+	// the unit finished (at least 1s), at most 10s.
+	deadline := finished.Add(10 * time.Second)
+	quietSince := func() time.Time {
+		if t := qw.lastWrite(); t.After(finished) {
+			return t
+		}
+		return finished
+	}
+	for time.Now().Before(deadline) && time.Since(quietSince()) < time.Second {
 		time.Sleep(100 * time.Millisecond)
 	}
 	stop()
@@ -314,8 +322,17 @@ func (e *Engine) ActivateStore(ctx context.Context, name string) error {
 			return err
 		}
 	}
-	err = e.activate(ctx, a, storePath, force)
+	res, err := e.activateResult(ctx, a, storePath, force)
 	if err == nil {
+		store := secrets.NewSystemdStore(e.SecretsDir)
+		for app := range force {
+			e.warnf(store.ClearRestart(app))
+		}
+		// A new app of the same name must not inherit old secrets.
+		for _, app := range res.Removed {
+			e.warnf(os.Remove(store.CredPath(app)))
+			e.warnf(store.ClearRestart(app))
+		}
 		if e.KeepGenerations > 0 {
 			if err := nixcmd.DeleteOldGenerations(ctx, e.Profile, e.KeepGenerations); err != nil {
 				e.logf("warning: %v", err)
@@ -418,16 +435,28 @@ func (e *Engine) activator() (*activate.Activator, error) {
 }
 
 func (e *Engine) activate(ctx context.Context, a *activate.Activator, profilePath string, force map[string]bool) error {
+	_, err := e.activateResult(ctx, a, profilePath, force)
+	return err
+}
+
+func (e *Engine) activateResult(ctx context.Context, a *activate.Activator, profilePath string, force map[string]bool) (*activate.Result, error) {
 	a.ForceRestart = force
 	res, err := a.Activate(ctx, profilePath)
-	if res != nil {
-		e.logf("started %v, switched %v, unchanged %v, removed %v, failed %v",
-			res.Started, res.Switched, res.Unchanged, res.Removed, res.Failed)
-		if len(res.Down) > 0 {
-			e.logf("warning: not running (unchanged, failed to start): %v", res.Down)
-		}
+	if res == nil {
+		return &activate.Result{}, err
 	}
-	return err
+	e.logf("started %v, switched %v, unchanged %v, removed %v, failed %v",
+		res.Started, res.Switched, res.Unchanged, res.Removed, res.Failed)
+	if len(res.Down) > 0 {
+		e.logf("warning: not running (unchanged, failed to start): %v", res.Down)
+	}
+	return res, err
+}
+
+func (e *Engine) warnf(err error) {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		e.logf("warning: %v", err)
+	}
 }
 
 // applyPendingSecrets runs as root: it encrypts pending secret changes into the
@@ -439,9 +468,14 @@ func (e *Engine) applyPendingSecrets(ctx context.Context, m *units.Manifest) (ma
 		apps = append(apps, name)
 		need[name] = app.Secrets
 	}
-	changed, err := secrets.NewSystemdStore(e.SecretsDir).Apply(ctx, e.PendingDir(), apps, need)
+	store := secrets.NewSystemdStore(e.SecretsDir)
+	changed, err := store.Apply(ctx, e.PendingDir(), apps, need)
 	for app := range changed {
 		e.logf("%s: secrets updated", app)
+	}
+	// Also apps whose new secrets an earlier, failed activation applied.
+	for app := range store.Restarts(apps) {
+		changed[app] = true
 	}
 	return changed, err
 }

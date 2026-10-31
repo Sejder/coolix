@@ -13,8 +13,8 @@
 </div>
 <fieldset>
   <legend>Databases <small>private to this app, peer-authenticated over a unix socket</small></legend>
-  <label class="check"><input type="checkbox" name="db_postgres" value="1" {{if hasDB . "postgres"}}checked{{end}}> PostgreSQL
-    <input class="tiny" name="pg_version" value="{{dbVersion .}}" placeholder="18" aria-label="PostgreSQL major version"> <small>sets <code>DATABASE_URL</code></small></label>
+  <div class="check"><label class="check"><input type="checkbox" name="db_postgres" value="1" {{if hasDB . "postgres"}}checked{{end}}> PostgreSQL</label>
+    <input class="tiny" name="pg_version" value="{{dbVersion .}}" placeholder="18" aria-label="PostgreSQL major version"> <small>sets <code>DATABASE_URL</code>; changing the major version needs a manual upgrade</small></div>
   <label class="check"><input type="checkbox" name="db_redis" value="1" {{if hasDB . "redis"}}checked{{end}}> Redis <small>sets <code>REDIS_URL</code></small></label>
 </fieldset>
 <label>Environment <small>KEY=VALUE per line; stored in git, so use secrets for anything sensitive</small>

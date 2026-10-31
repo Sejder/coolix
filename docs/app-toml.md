@@ -27,7 +27,8 @@ LOG_LEVEL = "info"                  # plain values; stored in git
 
 [[databases]]
 kind = "postgres"                   # sets DATABASE_URL, PGHOST, PGUSER, PGDATABASE
-version = "18"                      # PostgreSQL major version; default: 18
+version = "18"                      # PostgreSQL major version; default: 18. Changing it on
+                                    # existing data needs a manual pg_upgrade (or dump+restore)
 
 [[databases]]
 kind = "redis"                      # sets REDIS_URL (unix socket)

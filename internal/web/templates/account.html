@@ -9,7 +9,7 @@
     <ul class="secrets">
       {{range .Account.Passkeys}}
       <li><span>{{.Name}} <span class="muted small">added {{ago .Created}}{{if not .LastUsed.IsZero}}, last used {{ago .LastUsed}}{{end}}</span></span>
-        <form method="post" action="/account/passkeys/{{.ID}}/delete" hx-confirm="Remove passkey {{.Name}}?"><button class="link danger">remove</button></form></li>
+        <form method="post" action="/account/passkeys/{{.ID}}/delete" hx-confirm="Remove passkey {{.Name}}?"><button class="link danger">Remove</button></form></li>
       {{else}}
       <li class="muted">No passkeys yet.</li>
       {{end}}
@@ -27,14 +27,14 @@
   <section class="card form">
     <h2>Password</h2>
     {{if .PasswordFile}}<p class="muted small">The host also sets an admin password declaratively (<code>services.coolix.ui.adminPasswordFile</code>); it always works and is managed there.</p>{{end}}
-    <p class="small">{{if .Account.PasswordHash}}<span class="pill job-succeeded">set</span> You can sign in with your password.{{else}}<span class="pill">not set</span> {{if .Account.Passkeys}}You sign in with a passkey only.{{else}}Set a password or add a passkey.{{end}}{{end}}</p>
+    <p class="small">{{if .Account.PasswordHash}}<span class="pill job-succeeded"><i aria-hidden="true"></i>set</span> You can sign in with your password.{{else}}<span class="pill"><i aria-hidden="true"></i>not set</span> {{if .Account.Passkeys}}You sign in with a passkey only.{{else}}Set a password or add a passkey.{{end}}{{end}}</p>
     <form method="post" action="/account/password">
       <label>New password <small>at least {{.MinPassword}} characters</small><input type="password" name="password" autocomplete="new-password" required minlength="{{.MinPassword}}"></label>
-      <label>Repeat it<input type="password" name="confirm" autocomplete="new-password" required></label>
+      <label>Confirm password<input type="password" name="confirm" autocomplete="new-password" required></label>
       <div class="formactions"><button>{{if .Account.PasswordHash}}Change password{{else}}Set password{{end}}</button></div>
     </form>
     {{if .Account.PasswordHash}}
-    <form method="post" action="/account/password/delete" hx-confirm="Remove the password? You'll sign in with a passkey only."><button class="link danger">remove password</button></form>
+    <form method="post" action="/account/password/delete" hx-confirm="Remove the password? You'll sign in with a passkey only."><button class="link danger">Remove password</button></form>
     {{end}}
   </section>
 </div>

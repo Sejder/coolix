@@ -174,7 +174,7 @@ func Serve(ctx context.Context, in io.Reader, out io.Writer, s *Server) error {
 			io.Copy(io.Discard, br)
 			cancel()
 		}()
-		err = s.Handle(ctx, r, out)
+		err = s.Handle(ctx, r, control.Sanitize(out))
 	}
 	if err != nil {
 		fmt.Fprintf(out, "%serror: %s\n", control.Trailer, strings.ReplaceAll(err.Error(), "\n", "; "))
@@ -220,6 +220,9 @@ func (c Client) Stream(ctx context.Context, r Request, w io.Writer) error {
 	}
 	tw := &control.TrailerWriter{W: w}
 	_, err = io.Copy(tw, conn)
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("coolix-query: %w", ctx.Err())
+	}
 	if ctx.Err() != nil {
 		return nil // we stopped following
 	}

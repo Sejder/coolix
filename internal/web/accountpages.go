@@ -21,62 +21,60 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !sameOrigin(r) {
-		http.Error(w, "cross-origin request rejected", http.StatusForbidden)
+		s.errorPage(w, r, http.StatusForbidden, "cross-origin request rejected")
 		return
 	}
 	fail := func(status int, msg string) {
 		data["Error"] = msg
-		w.WriteHeader(status)
-		s.render(w, r, "setup", data)
+		s.renderStatus(w, r, status, "setup", data)
 	}
 	ip := clientIP(r)
 	if s.logins.blocked(ip, time.Now()) {
 		fail(http.StatusTooManyRequests, "Too many failed attempts. Try again later.")
 		return
 	}
-	s.logins.check.Lock()
-	ok := checkSetupCode(s.Config.StateDir, r.FormValue("code"))
-	if !ok {
-		s.logins.fail(ip, time.Now())
-		time.Sleep(time.Second)
-	}
-	s.logins.check.Unlock()
-	if !ok {
-		fail(http.StatusUnauthorized, "Wrong or expired setup code. Run `sudo coolix setup-code` on the server for a new one.")
-		return
-	}
+	// Check the password first, so a typo doesn't use up the code.
 	pw := r.FormValue("password")
 	if pw != "" {
 		if err := checkNewPassword(pw, r.FormValue("confirm")); err != nil {
 			fail(http.StatusUnprocessableEntity, err.Error())
 			return
 		}
+	}
+	if !checkSetupCode(s.Config.StateDir, r.FormValue("code")) {
+		s.logins.fail(ip, time.Now())
+		time.Sleep(time.Second)
+		fail(http.StatusUnauthorized, "Wrong or expired setup code. Run `sudo coolix setup-code` on the server for a new one.")
+		return
+	}
+	clearSetupCode(s.Config.StateDir) // single use
+	if pw != "" {
 		hash, err := HashPassword(pw)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			s.errorPage(w, r, http.StatusInternalServerError, err.Error())
 			return
 		}
 		if _, err := s.Accounts.Update(func(a *Account) error { a.PasswordHash = hash; return nil }); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			s.errorPage(w, r, http.StatusInternalServerError, err.Error())
 			return
 		}
 		clearSetupCode(s.Config.StateDir)
-		s.signIn(w, r, "/account?msg="+urlQueryEscape("Account created. You can add a passkey here."))
+		s.signIn(w, r, "/account", "Account created. You can add a passkey here.")
 		return
 	}
 	// No password: signed in by the setup code, which stays valid until a
 	// passkey is added.
 	if _, err := s.Accounts.Update(func(*Account) error { return nil }); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.errorPage(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.signIn(w, r, "/account?msg="+urlQueryEscape("Now add a passkey to finish setting up your account."))
+	s.signIn(w, r, "/account", "Now add a passkey to finish setting up your account.")
 }
 
 func (s *Server) handleAccount(w http.ResponseWriter, r *http.Request) {
 	a, err := s.Accounts.Get()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.errorPage(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
 	s.render(w, r, "account", map[string]any{
@@ -104,9 +102,13 @@ func (s *Server) credentialsAfter(a *Account) int {
 var errLastCredential = errors.New("that's the only way left to sign in; add a passkey or password first")
 
 func (s *Server) handleSetPassword(w http.ResponseWriter, r *http.Request) {
+	if !s.credentialChangeAllowed(r) {
+		s.redirect(w, r, "/account", errNotRecent)
+		return
+	}
 	pw := r.FormValue("password")
 	if err := checkNewPassword(pw, r.FormValue("confirm")); err != nil {
-		redirect(w, r, "/account", err.Error())
+		s.redirect(w, r, "/account", err.Error())
 		return
 	}
 	hash, err := HashPassword(pw)
@@ -118,14 +120,18 @@ func (s *Server) handleSetPassword(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.errorPage(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
 	clearSetupCode(s.Config.StateDir)
-	s.signIn(w, r, "/account?msg="+urlQueryEscape("Password saved. Other sessions were signed out."))
+	s.signIn(w, r, "/account", "Password saved. Other sessions were signed out.")
 }
 
 func (s *Server) handleRemovePassword(w http.ResponseWriter, r *http.Request) {
+	if !s.credentialChangeAllowed(r) {
+		s.redirect(w, r, "/account", errNotRecent)
+		return
+	}
 	_, err := s.Accounts.Update(func(a *Account) error {
 		if a.PasswordHash == "" {
 			return nil
@@ -138,13 +144,17 @@ func (s *Server) handleRemovePassword(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if err != nil {
-		redirect(w, r, "/account", err.Error())
+		s.redirect(w, r, "/account", err.Error())
 		return
 	}
-	s.signIn(w, r, "/account?msg="+urlQueryEscape("Password removed."))
+	s.signIn(w, r, "/account", "Password removed.")
 }
 
 func (s *Server) handleRemovePasskey(w http.ResponseWriter, r *http.Request) {
+	if !s.credentialChangeAllowed(r) {
+		s.redirect(w, r, "/account", errNotRecent)
+		return
+	}
 	id := r.PathValue("id")
 	_, err := s.Accounts.Update(func(a *Account) error {
 		i := slices.IndexFunc(a.Passkeys, func(p Passkey) bool { return p.ID() == id })
@@ -159,8 +169,20 @@ func (s *Server) handleRemovePasskey(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if err != nil {
-		redirect(w, r, "/account", err.Error())
+		s.redirect(w, r, "/account", err.Error())
 		return
 	}
-	s.signIn(w, r, "/account?msg="+urlQueryEscape("Passkey removed. Other sessions were signed out."))
+	s.signIn(w, r, "/account", "Passkey removed. Other sessions were signed out.")
 }
+
+// credentialChangeAllowed requires a fresh sign-in to change credentials,
+// except while setting up an account that has none yet.
+func (s *Server) credentialChangeAllowed(r *http.Request) bool {
+	a, err := s.Accounts.Get()
+	if err != nil {
+		return false
+	}
+	return !a.HasCredential() || s.recentAuth(r)
+}
+
+const errNotRecent = "For your security, sign out and back in (within 15 minutes) to change how you sign in."

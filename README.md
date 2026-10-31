@@ -109,7 +109,7 @@ sudo coolix deploy blog
 coolix app add NAME --source REF [flags]   add an app
 coolix app set NAME [flags]                change it: --source, --domain, --env K=V, --unset-env K,
                                            --health-path, --health-timeout, --package, --command,
-                                           --pre-start, --path ATTR, --memory-max, --cpu-quota,
+                                           --pre-start, --pre-start-timeout, --path ATTR, --memory-max, --cpu-quota,
                                            --tasks-max, --db postgres[:VERSION] / --db redis / --db none,
                                            --backup-schedule, --backup-keep, --webhook-branch
 coolix app rm NAME                         remove it (applied on next deploy)

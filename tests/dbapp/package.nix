@@ -16,6 +16,8 @@ let
     id -un > "$out/user"
     cat migrated > "$out/migrated" 2>/dev/null || echo no > "$out/migrated"
     (hello 2>/dev/null || echo none) > "$out/hello"
+    # Can it reach the root nix-daemon?
+    test -e /nix/var/nix/daemon-socket/socket && echo reachable > "$out/nixd" || echo hidden > "$out/nixd"
     # May it listen on a port that isn't its own (the UI's)?
     ${pkgs.python3}/bin/python3 -c 'import socket; socket.socket().bind(("127.0.0.1", 8090))' 2>/dev/null \
       && echo bound > "$out/squat" || echo denied > "$out/squat"

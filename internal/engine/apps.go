@@ -1,13 +1,16 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"slices"
 	"sort"
+	"strings"
 
 	"coolix/internal/appdef"
 	"coolix/internal/secrets"
+	"coolix/internal/units"
 )
 
 func (e *Engine) Apps() ([]*appdef.App, error) {
@@ -62,6 +65,9 @@ func (e *Engine) CreateApp(app *appdef.App) error {
 }
 
 func (e *Engine) save(app *appdef.App, msg string) error {
+	if err := e.checkHostPolicy(app); err != nil {
+		return err
+	}
 	if app.Backup != nil && app.Backup.Schedule != "" {
 		if err := checkCalendar(app.Backup.Schedule); err != nil {
 			return fmt.Errorf("backup schedule %q: %w", app.Backup.Schedule, err)
@@ -189,4 +195,40 @@ func (e *Engine) ModifyApp(name string, change func(*appdef.App) error) (*appdef
 	}
 	app.Normalize()
 	return app, e.save(app, "Update app "+name)
+}
+
+// checkHostPolicy catches, when saving, what root would refuse at the next
+// deploy (and so block every deploy): domains that are reserved or used by
+// another app, and [hardening] keys this host doesn't allow.
+func (e *Engine) checkHostPolicy(app *appdef.App) error {
+	p := e.Policy()
+	m := &units.Manifest{Apps: map[string]units.App{}}
+	r, err := e.Repo()
+	if err != nil {
+		return err
+	}
+	others, err := appdef.LoadAll(r.Dir)
+	if err != nil {
+		return err
+	}
+	m.Apps[app.Name] = units.App{Domains: app.Domains, Hardening: app.Hardening}
+	var errs []error
+	for _, o := range others {
+		if o.Name == app.Name {
+			continue
+		}
+		for _, d := range app.Domains {
+			if slices.ContainsFunc(o.Domains, func(x string) bool { return strings.EqualFold(x, d) }) {
+				errs = append(errs, fmt.Errorf("domain %s is already used by %s", d, o.Name))
+			}
+		}
+	}
+	for _, err := range p.ValidateApps(m) {
+		for _, line := range strings.Split(err.Error(), "\n") {
+			if strings.HasPrefix(line, "app "+app.Name+": domain") || strings.HasPrefix(line, "app "+app.Name+": hardening") {
+				errs = append(errs, errors.New(strings.TrimPrefix(line, "app "+app.Name+": ")))
+			}
+		}
+	}
+	return errors.Join(errs...)
 }

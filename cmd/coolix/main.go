@@ -28,7 +28,7 @@ const usage = `usage: coolix <command> [args]
 commands:
   app add NAME --source REF    add an app (see app set for flags)
   app set NAME [flags]         change an app: --source, --domain (repeatable), --env K=V, --unset-env K,
-                               --health-path, --health-timeout, --package, --command, --pre-start,
+                               --health-path, --health-timeout, --package, --command, --pre-start, --pre-start-timeout,
                                --path ATTR (repeatable), --memory-max, --cpu-quota, --tasks-max,
                                --db postgres[:VERSION] / --db redis / --db none,
                                --backup-schedule, --backup-keep, --webhook-branch
@@ -139,6 +139,9 @@ func run(ctx context.Context, args []string) error {
 		if os.Geteuid() != 0 {
 			return errors.New("control-serve must run as root")
 		}
+		// The client may go away mid-activation; without this, the next write
+		// to the socket (fd 1) kills the process with SIGPIPE.
+		signal.Ignore(syscall.SIGPIPE)
 		// One connection on stdin/stdout (coolix-control@); the journal
 		// (stderr) keeps an audit trail. Not cancelled when the client
 		// goes away: a half-done activation is worse than an unwatched one.

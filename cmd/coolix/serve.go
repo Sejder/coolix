@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,15 +43,19 @@ func runServe(ctx context.Context, e *engine.Engine) error {
 	if err != nil {
 		return err
 	}
-	srv := &http.Server{Addr: listen, Handler: h, ReadHeaderTimeout: 10 * time.Second}
+	ln, where, err := listener(listen)
+	if err != nil {
+		return err
+	}
+	srv := &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second, ConnContext: web.ConnContext}
 	go func() {
 		<-ctx.Done()
 		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		srv.Shutdown(sctx)
 	}()
-	logf("web UI listening on http://%s", listen)
-	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+	logf("web UI listening on %s", where)
+	if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil
@@ -75,4 +81,20 @@ func runAccount(e *engine.Engine, args []string) error {
 	}
 	logf("removed the admin account's password and passkeys; run `coolix setup-code` to claim it again")
 	return nil
+}
+
+// listener uses the socket systemd passes (coolix.socket: a unix socket
+// only Caddy and root can open), or listens on addr.
+func listener(addr string) (net.Listener, string, error) {
+	if os.Getenv("LISTEN_PID") == strconv.Itoa(os.Getpid()) && os.Getenv("LISTEN_FDS") == "1" {
+		f := os.NewFile(3, "coolix.socket")
+		ln, err := net.FileListener(f)
+		f.Close()
+		if err != nil {
+			return nil, "", fmt.Errorf("socket from systemd: %w", err)
+		}
+		return ln, ln.Addr().Network() + ":" + ln.Addr().String(), nil
+	}
+	ln, err := net.Listen("tcp", addr)
+	return ln, "http://" + addr, err
 }

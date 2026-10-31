@@ -94,6 +94,10 @@
     with subtest("apps can only listen on their own ports"):
         assert get("squat") == "denied", get("squat")
 
+    with subtest("apps can't reach the nix daemon"):
+        machine.succeed("test -S /nix/var/nix/daemon-socket/socket")
+        assert get("nixd") == "hidden", get("nixd")
+
     with subtest("secrets reach the app but not git, the store or disk in plaintext"):
         assert get("secret") == "s3cr3t value", get("secret")
         machine.succeed("coolix secret list db | grep -x API_TOKEN")

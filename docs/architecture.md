@@ -132,7 +132,9 @@ when a forge reports a push. Each app has its own random token, stored in
 signed with it: an HMAC-SHA256 signature for GitHub (`X-Hub-Signature-256`),
 Gitea and Forgejo, the token itself for GitLab (`X-Gitlab-Token`), or
 `Authorization: Bearer <token>` for anything else. Pings are answered, other
-events and pushes to other branches than `webhook.branch` are ignored. The UI
+events and pushes to other branches than `webhook.branch` are ignored. A
+matching push deploys the app's `source` as written: set the branch there too
+(e.g. `github:you/app/main`) so the filter and the deployed branch agree. The UI
 must be reachable from the forge for this, normally via `ui.domain`.
 
 ## Security model
@@ -175,6 +177,10 @@ login, from becoming root:
   slot or the UI's port and answer their health checks. Databases and backup
   jobs have no network at all. Caddy's admin API, which could reroute every
   domain, is on a unix socket only Caddy can open, not on `localhost:2019`.
+- **No back doors to the host.** The web UI listens on a unix socket only
+  Caddy and root can open, so apps can't talk to it directly or forge the
+  client address it rate-limits by. Apps can't reach the root nix-daemon
+  either (`InaccessiblePaths`), so they can't build outside their limits.
 - **No journal access.** The coolix user isn't in `systemd-journal`. App logs
   and backup listings come from `coolix-query`: a socket-activated service
   (`/run/coolix/query.sock`, group `coolix`) that runs as a throwaway dynamic
@@ -189,6 +195,10 @@ login, from becoming root:
   Origin-checked and there's a strict Content-Security-Policy. A fresh
   install can only be claimed with a one-time code from
   `sudo coolix setup-code`, so whoever finds the URL first can't take it.
+
+Plain `env` values aren't secret: they're in git and in the rendered units,
+which any local user can read. Use secrets for anything sensitive. Secret
+changes aren't versioned: rolling back a deploy keeps the current secrets.
 
 The coolix user can still run arbitrary code as *any app* (that's what
 deploying is) and so read that app's secrets and data. Treat the admin

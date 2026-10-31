@@ -204,33 +204,83 @@ func (s *Store) Apply(ctx context.Context, pendingDir string, apps []string, nee
 	}
 	defer dir.close()
 	for _, app := range apps {
-		p, err := dir.read(app)
+		// Claim the pending file by renaming it first: a change saved while
+		// we encrypt lands in a new <app>.json and is applied next time,
+		// instead of being deleted unseen. A leftover .applying (from a
+		// failed run) is applied first.
+		p, err := dir.readName(app + ".json.applying")
 		if err != nil {
 			return changed, err
 		}
+		if len(p.Set) == 0 && len(p.Unset) == 0 {
+			if err := dir.claim(app); err != nil {
+				return changed, err
+			}
+			if p, err = dir.readName(app + ".json.applying"); err != nil {
+				return changed, err
+			}
+		}
+		batches := []*Pending{p}
+		if len(p.Set) == 0 && len(p.Unset) == 0 {
+			batches = nil
+		}
 		_, statErr := os.Stat(s.CredPath(app))
-		if len(p.Set) == 0 && len(p.Unset) == 0 && !(needCred[app] && statErr != nil) {
+		if len(batches) == 0 && !(needCred[app] && statErr != nil) {
 			continue
 		}
 		vars, err := s.read(ctx, app)
 		if err != nil {
 			return changed, err
 		}
-		for k, v := range p.Set {
-			vars[k] = v
-		}
-		for _, k := range p.Unset {
-			delete(vars, k)
+		for _, p := range batches {
+			for k, v := range p.Set {
+				vars[k] = v
+			}
+			for _, k := range p.Unset {
+				delete(vars, k)
+			}
 		}
 		if err := s.write(ctx, app, vars); err != nil {
 			return changed, err
 		}
-		if err := dir.remove(app); err != nil {
+		// Until an activation succeeds, the app still needs a restart for
+		// these values, even if this activation fails.
+		if err := s.MarkRestart(app); err != nil {
+			return changed, err
+		}
+		if err := dir.removeName(app + ".json.applying"); err != nil {
 			return changed, err
 		}
 		changed[app] = true
 	}
 	return changed, nil
+}
+
+func (s *Store) restartPath(app string) string { return filepath.Join(s.Dir, app+".restart") }
+
+// MarkRestart records that app must move to a fresh slot to pick up new
+// secret values.
+func (s *Store) MarkRestart(app string) error {
+	return os.WriteFile(s.restartPath(app), nil, 0o600)
+}
+
+// Restarts returns the apps (of apps) with a pending restart marker.
+func (s *Store) Restarts(apps []string) map[string]bool {
+	out := map[string]bool{}
+	for _, app := range apps {
+		if _, err := os.Stat(s.restartPath(app)); err == nil {
+			out[app] = true
+		}
+	}
+	return out
+}
+
+// ClearRestart removes the marker once app runs with its current secrets.
+func (s *Store) ClearRestart(app string) error {
+	if err := os.Remove(s.restartPath(app)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func contains(s []string, v string) bool {
@@ -273,11 +323,27 @@ func (d *pendingDir) close() {
 	}
 }
 
-func (d *pendingDir) read(app string) (*Pending, error) {
+func (d *pendingDir) read(app string) (*Pending, error) { return d.readName(app + ".json") }
+
+// claim renames <app>.json to <app>.json.applying (not following symlinks:
+// rename moves the link itself, and readName refuses it).
+func (d *pendingDir) claim(app string) error {
+	if d == nil {
+		return nil
+	}
+	err := syscall.Renameat(d.fd, app+".json", d.fd, app+".json.applying")
+	if err != nil && !errors.Is(err, syscall.ENOENT) {
+		return fmt.Errorf("claiming pending secrets of %s: %w", app, err)
+	}
+	return nil
+}
+
+func (d *pendingDir) readName(name string) (*Pending, error) {
+	app := strings.TrimSuffix(strings.TrimSuffix(name, ".applying"), ".json")
 	if d == nil {
 		return &Pending{}, nil
 	}
-	fd, err := syscall.Openat(d.fd, app+".json", syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	fd, err := syscall.Openat(d.fd, name, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
 	if errors.Is(err, syscall.ENOENT) {
 		return &Pending{}, nil
 	} else if err != nil {
@@ -305,11 +371,11 @@ func (d *pendingDir) read(app string) (*Pending, error) {
 	return &p, nil
 }
 
-func (d *pendingDir) remove(app string) error {
+func (d *pendingDir) removeName(name string) error {
 	if d == nil {
 		return nil
 	}
-	if err := syscall.Unlinkat(d.fd, app+".json"); err != nil && !errors.Is(err, syscall.ENOENT) {
+	if err := syscall.Unlinkat(d.fd, name); err != nil && !errors.Is(err, syscall.ENOENT) {
 		return err
 	}
 	return nil

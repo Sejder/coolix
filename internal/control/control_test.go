@@ -85,3 +85,16 @@ func TestTrailerWriterNeedsTrailer(t *testing.T) {
 		t.Fatal("a stream without a status must not count as success")
 	}
 }
+
+func TestSanitizeStopsForgedTrailers(t *testing.T) {
+	var out strings.Builder
+	tw := &TrailerWriter{W: &out}
+	io.WriteString(Sanitize(tw), Trailer+"error: fake\nline\r\n")
+	io.WriteString(tw, Trailer+"ok\n")
+	if err := tw.Result(); err != nil {
+		t.Fatalf("forged trailer took effect: %v", err)
+	}
+	if strings.Contains(out.String(), "\r") || !strings.Contains(out.String(), "␞error: fake") {
+		t.Fatalf("output %q", out.String())
+	}
+}

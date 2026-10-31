@@ -7,10 +7,10 @@
   </div>
 </div>
 
-<div id="live" hx-get="/" hx-select="#live" hx-trigger="every 5s" hx-swap="outerHTML">
+<div id="live" data-poll hx-get="/" hx-select="#live" hx-trigger="every 5s" hx-swap="outerHTML">
 {{with .Status}}
 {{if not .RunningRev}}
-  <div class="banner">Nothing deployed yet. Add an app and deploy it.</div>
+  {{if .Apps}}<div class="banner">Nothing deployed yet. Deploy to start your apps.</div>{{end}}
 {{else if .OldProfile}}
   <div class="banner warn">The running profile was built by an older coolix and won't start at boot. Deploy to rebuild it.</div>
 {{else if .UpToDate}}
@@ -20,14 +20,14 @@
 {{end}}
 
 <div class="card flush">
-<table class="apps">
+<div class="tablewrap"><table class="apps">
   <thead><tr><th>App</th><th>Status</th><th>Domains</th><th>Source</th><th></th></tr></thead>
   <tbody>
   {{range .Apps}}
     <tr>
       <td><a class="appname" href="/apps/{{.Name}}">{{.Name}}</a></td>
       <td>{{template "slot" .}}</td>
-      <td>{{range .Domains}}<a class="domain" href="https://{{.}}" rel="noopener">{{.}}</a> {{else}}<span class="muted">—</span>{{end}}</td>
+      <td>{{range .Domains}}<a class="domain" href="https://{{.}}" target="_blank" rel="noopener">{{.}}</a> {{else}}<span class="muted">—</span>{{end}}</td>
       <td>{{with .Def}}<code class="src">{{.Source}}</code>{{else}}<span class="muted">removed</span>{{end}}</td>
       <td class="right">{{if .Def}}<form method="post" action="/apps/{{.Name}}/deploy"><button class="small">Deploy</button></form>{{end}}</td>
     </tr>
@@ -35,7 +35,7 @@
     <tr><td colspan="5" class="empty">No apps yet. <a href="/apps/new">Add your first app</a>: any flake exposing <code>packages.&lt;system&gt;.default</code> that listens on <code>$PORT</code>.</td></tr>
   {{end}}
   </tbody>
-</table>
+</table></div>
 </div>
 {{end}}
 

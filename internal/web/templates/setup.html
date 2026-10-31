@@ -9,11 +9,11 @@
     <fieldset>
       <legend>Password <small>optional{{if .Passkeys}} if you'll use a passkey{{end}}</small></legend>
       <label>New password <small>at least {{.MinPassword}} characters</small><input type="password" name="password" autocomplete="new-password" minlength="{{.MinPassword}}"></label>
-      <label>Repeat it<input type="password" name="confirm" autocomplete="new-password"></label>
+      <label>Confirm password<input type="password" name="confirm" autocomplete="new-password"></label>
     </fieldset>
     <button class="primary">Create account</button>
     {{if .Passkeys}}<p class="muted small">Next you can add a passkey (Touch ID, Windows Hello, a phone or a security key).</p>{{end}}
   </form>
-  <p class="loginfoot"><button class="link theme-toggle" type="button" data-theme-toggle title="Theme">Theme</button></p>
+  <p class="loginfoot"><button class="link theme-toggle" type="button" data-theme-toggle aria-label="Color theme">Theme</button></p>
 </div>
 {{end}}

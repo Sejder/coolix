@@ -1,9 +1,10 @@
 {{define "content"}}
+<div hidden data-poll hx-get="/apps/{{.App.Name}}?poll=1" hx-trigger="every 5s" hx-select-oob="#slot,#appjobs" hx-swap="none"></div>
 <div class="pagehead">
   <div>
-    <h1>{{.App.Name}} <span id="slot" hx-get="/apps/{{.App.Name}}" hx-select="#slot" hx-trigger="every 5s" hx-swap="outerHTML">{{template "slot" .AppState}}</span></h1>
+    <h1>{{.App.Name}} <span id="slot" aria-live="polite">{{template "slot" .AppState}}</span></h1>
     <p class="sub">
-      {{range .App.Domains}}<a class="domain" href="https://{{.}}" rel="noopener">{{.}}</a> {{end}}
+      {{range .App.Domains}}<a class="domain" href="https://{{.}}" target="_blank" rel="noopener">{{.}}</a> {{end}}
       <code class="src">{{.App.Source}}</code>
     </p>
   </div>
@@ -25,8 +26,8 @@
       <p class="muted small">Encrypted with systemd-creds and handed to the app as environment variables. Values are write-only; they never enter git or the Nix store.</p>
       <ul class="secrets">
         {{range .Secrets}}
-        <li><code>{{.Name}}</code>{{if .Pending}} <span class="pill warnpill">not deployed</span>{{end}}
-          <form method="post" action="/apps/{{$.App.Name}}/secrets/{{.Name}}/delete" hx-confirm="Remove secret {{.Name}}?"><button class="link danger">remove</button></form></li>
+        <li><code>{{.Name}}</code>{{if .Pending}} <span class="pill warnpill"><i aria-hidden="true"></i>pending</span>{{end}}
+          <form method="post" action="/apps/{{$.App.Name}}/secrets/{{.Name}}/delete" hx-confirm="Remove secret {{.Name}}?"><button class="link danger">Remove</button></form></li>
         {{else}}
         <li class="muted">No secrets.</li>
         {{end}}
@@ -55,7 +56,7 @@
       <div class="inline">
         <form method="post" action="/apps/{{.App.Name}}/webhook"{{if .Webhook}} hx-confirm="Rotate the webhook secret? The old one stops working."{{end}}>
           <button>{{if .Webhook}}Rotate secret{{else}}Enable{{end}}</button></form>
-        {{if .Webhook}}<form method="post" action="/apps/{{.App.Name}}/webhook"><input type="hidden" name="action" value="disable"><button class="link danger">disable</button></form>{{end}}
+        {{if .Webhook}}<form method="post" action="/apps/{{.App.Name}}/webhook"><input type="hidden" name="action" value="disable"><button class="link danger">Disable</button></form>{{end}}
       </div>
     </section>
 
@@ -67,9 +68,8 @@
       <ul class="backups">
         {{range .Backups}}
         <li><code>{{.Name}}</code> <span class="muted small">{{bytes .Size}} · {{ago .Time}}</span>
-          <form method="post" action="/apps/{{$.App.Name}}/backups/{{.Name}}/restore" class="inline">
-            <input name="confirm" placeholder="type {{$.App.Name}}" required spellcheck="false" aria-label="Confirm app name to restore">
-            <button class="link danger">restore</button></form></li>
+          <form method="post" action="/apps/{{$.App.Name}}/backups/{{.Name}}/restore" hx-confirm="Replace the {{$.App.Name}} database with the backup {{.Name}}? Changes since then are lost.">
+            <button class="link danger">Restore</button></form></li>
         {{else}}
         {{if not .BackupsErr}}<li class="muted">No backups yet.</li>{{end}}
         {{end}}
@@ -80,7 +80,7 @@
 
     <section class="card flush">
       <h2 class="pad">Deploys</h2>
-      <div id="appjobs" hx-get="/apps/{{.App.Name}}" hx-select="#appjobs" hx-trigger="every 5s" hx-swap="outerHTML">{{template "jobs" .Jobs}}</div>
+      <div id="appjobs">{{template "jobs" .Jobs}}</div>
     </section>
 
     <section class="card dangerzone">

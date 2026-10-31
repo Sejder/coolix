@@ -8,21 +8,21 @@
   <link rel="stylesheet" href="/static/style.css">
   <link rel="icon" href="/static/logo.svg">
   <!-- htmx: no eval, no injected styles (strict CSP); 4xx pages (form errors) are swapped in too. -->
-  <meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false,"selfRequestsOnly":true,"historyCacheSize":0,"responseHandling":[{"code":"204","swap":false},{"code":"...","swap":true}]}'>
+  <meta name="htmx-config" content='{"disableInheritance":true,"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false,"selfRequestsOnly":true,"historyCacheSize":0,"responseHandling":[{"code":"204","swap":false},{"code":"...","swap":true}]}'>
   <script src="/static/vendor/htmx.min.js" defer></script>
   <script src="/static/app.js" defer></script>
 </head>
-<body class="page-{{.Page}}" hx-boost="true">
+<body hx-boost="true" hx-inherit="hx-boost">
   {{if .Authed}}
   <header class="topbar">
-    <a class="brand" href="/"><img src="/static/logo.svg" alt="" width="22" height="22"> coolix</a>
+    <a class="brand" href="/"><img src="/static/logo.svg" alt="" width="22" height="22"> <span>coolix</span></a>
     <nav>
       <a href="/" {{if or (eq .Page "dashboard") (eq .Page "app") (eq .Page "new")}}class="active"{{end}}>Apps</a>
       <a href="/generations" {{if eq .Page "generations"}}class="active"{{end}}>Generations</a>
       <a href="/account" {{if eq .Page "account"}}class="active"{{end}}>Account</a>
     </nav>
-    <button class="link theme-toggle" type="button" data-theme-toggle title="Theme">Theme</button>
-    <form method="post" action="/logout"><button class="link">Sign out</button></form>
+    <button class="link theme-toggle" type="button" data-theme-toggle aria-label="Color theme">Theme</button>
+    <form method="post" action="/logout" hx-boost="false"><button class="link">Sign out</button></form>
   </header>
   {{end}}
   <main>
@@ -33,9 +33,9 @@
 </body>
 </html>{{end}}
 
-{{define "slot"}}{{if .Slot}}<span class="pill live"><i></i>{{.Slot}} · :{{.Port}}</span>{{else if .Deployed}}<span class="pill down"><i></i>stopped</span>{{else}}<span class="pill idle"><i></i>not deployed</span>{{end}}{{end}}
+{{define "slot"}}{{if .Slot}}<span class="pill live"><i aria-hidden="true"></i>{{.Slot}} · :{{.Port}}</span>{{else if .Deployed}}<span class="pill down"><i aria-hidden="true"></i>stopped</span>{{else}}<span class="pill idle"><i aria-hidden="true"></i>not deployed</span>{{end}}{{end}}
 
-{{define "jobstate"}}<span class="pill job-{{.}}" data-job-state><i></i>{{.}}</span>{{end}}
+{{define "jobstate"}}<span class="pill job-{{.}}" data-job-state role="status"><i aria-hidden="true"></i><span>{{.}}</span></span>{{end}}
 
 {{define "jobs"}}
 <ul class="jobs">

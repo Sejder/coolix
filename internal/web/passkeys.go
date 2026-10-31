@@ -25,6 +25,7 @@ const ceremonyTTL = 5 * time.Minute
 
 type ceremony struct {
 	kind    string // register | login
+	client  string
 	session webauthn.SessionData
 	expires time.Time
 }
@@ -34,7 +35,14 @@ type ceremonies struct {
 	m  map[string]ceremony
 }
 
-func (c *ceremonies) put(kind string, s *webauthn.SessionData) (string, error) {
+// Pending ceremonies per client and in total. When full, the oldest goes:
+// a flood can delay a sign-in, but not lock the admin out.
+const (
+	maxCeremoniesPerClient = 5
+	maxCeremonies          = 1000
+)
+
+func (c *ceremonies) put(kind, client string, s *webauthn.SessionData) (string, error) {
 	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
@@ -46,15 +54,28 @@ func (c *ceremonies) put(kind string, s *webauthn.SessionData) (string, error) {
 		c.m = map[string]ceremony{}
 	}
 	now := time.Now()
+	perClient := 0
 	for k, v := range c.m {
 		if now.After(v.expires) {
 			delete(c.m, k)
+		} else if v.client == client {
+			perClient++
 		}
 	}
-	if len(c.m) > 1000 {
-		return "", errors.New("too many pending passkey ceremonies")
+	for perClient >= maxCeremoniesPerClient || len(c.m) >= maxCeremonies {
+		oldest := ""
+		for k, v := range c.m {
+			if (perClient < maxCeremoniesPerClient || v.client == client) &&
+				(oldest == "" || v.expires.Before(c.m[oldest].expires)) {
+				oldest = k
+			}
+		}
+		if c.m[oldest].client == client {
+			perClient--
+		}
+		delete(c.m, oldest)
 	}
-	c.m[token] = ceremony{kind: kind, session: *s, expires: now.Add(ceremonyTTL)}
+	c.m[token] = ceremony{kind: kind, client: client, session: *s, expires: now.Add(ceremonyTTL)}
 	return token, nil
 }
 
@@ -115,6 +136,10 @@ func jsonError(w http.ResponseWriter, status int, err error) {
 
 // handlePasskeyRegisterBegin starts adding a passkey to the account.
 func (s *Server) handlePasskeyRegisterBegin(w http.ResponseWriter, r *http.Request) {
+	if !s.credentialChangeAllowed(r) {
+		jsonError(w, http.StatusForbidden, errors.New(errNotRecent))
+		return
+	}
 	id, origin, err := s.rp(r)
 	if err != nil {
 		jsonError(w, http.StatusBadRequest, err)
@@ -132,13 +157,16 @@ func (s *Server) handlePasskeyRegisterBegin(w http.ResponseWriter, r *http.Reque
 	creation, session, err := s.webauthn.BeginRegistration(accountUser{a},
 		webauthn.WithRegistrationRelyingPartyID(id),
 		webauthn.WithRegistrationOrigin(origin),
-		webauthn.WithResidentKeyRequirement(protocol.ResidentKeyRequirementRequired),
+		webauthn.WithAuthenticatorSelection(protocol.AuthenticatorSelection{
+			ResidentKey:      protocol.ResidentKeyRequirementRequired,
+			UserVerification: protocol.VerificationRequired,
+		}),
 		webauthn.WithExclusions(exclude))
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err)
 		return
 	}
-	token, err := s.ceremonies.put("register", session)
+	token, err := s.ceremonies.put("register", clientIP(r), session)
 	if err != nil {
 		jsonError(w, http.StatusServiceUnavailable, err)
 		return
@@ -170,6 +198,11 @@ func (s *Server) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Requ
 		if err != nil {
 			return err
 		}
+		if !a.HasCredential() {
+			// The first credential claims the account: void every session
+			// from before (e.g. one opened with a leaked setup code).
+			a.Epoch++
+		}
 		a.Passkeys = append(a.Passkeys, Passkey{Name: name, Created: time.Now(), Credential: *cred})
 		return nil
 	})
@@ -178,7 +211,14 @@ func (s *Server) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	clearSetupCode(s.Config.StateDir)
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	cookie, err := s.newSession()
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err)
+		return
+	}
+	http.SetCookie(w, cookie)
+	s.setFlash(w, "Passkey added.")
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "redirect": "/account"})
 }
 
 // handlePasskeyLoginBegin starts a usernameless (discoverable) login.
@@ -195,12 +235,12 @@ func (s *Server) handlePasskeyLoginBegin(w http.ResponseWriter, r *http.Request)
 	assertion, session, err := s.webauthn.BeginDiscoverableLogin(
 		webauthn.WithLoginRelyingPartyID(id),
 		webauthn.WithLoginOrigin(origin),
-		webauthn.WithUserVerification(protocol.VerificationPreferred))
+		webauthn.WithUserVerification(protocol.VerificationRequired))
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err)
 		return
 	}
-	token, err := s.ceremonies.put("login", session)
+	token, err := s.ceremonies.put("login", clientIP(r), session)
 	if err != nil {
 		jsonError(w, http.StatusServiceUnavailable, err)
 		return
@@ -242,6 +282,9 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 		_, cred, err := s.webauthn.FinishPasskeyLogin(handler, session, withBody(r, body))
 		if err != nil {
 			return err
+		}
+		if cred.Authenticator.CloneWarning {
+			return errors.New("this passkey's signature counter went backwards; it may have been cloned. Remove it and add a new one")
 		}
 		for i := range a.Passkeys {
 			if bytes.Equal(a.Passkeys[i].Credential.ID, cred.ID) {

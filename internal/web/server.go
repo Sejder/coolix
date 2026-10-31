@@ -4,8 +4,10 @@ package web
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"embed"
+	"encoding/base64"
 	"fmt"
 	"html/template"
 	"io"
@@ -188,7 +190,7 @@ func (s *Server) Handler() (http.Handler, error) {
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
-		h.Set("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; frame-ancestors 'none'")
+		h.Set("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "same-origin")
 		next.ServeHTTP(w, r)
@@ -196,6 +198,13 @@ func securityHeaders(next http.Handler) http.Handler {
 }
 
 func (s *Server) render(w http.ResponseWriter, r *http.Request, page string, data map[string]any) {
+	s.renderStatus(w, r, http.StatusOK, page, data)
+}
+
+// renderStatus renders a page inside the layout. Pages answering a POST
+// (form errors, a freshly shown webhook secret) aren't pushed to the
+// browser history: reloading them would re-send nothing useful.
+func (s *Server) renderStatus(w http.ResponseWriter, r *http.Request, status int, page string, data map[string]any) {
 	t, ok := s.pages[page]
 	if !ok {
 		http.Error(w, "no such page", http.StatusInternalServerError)
@@ -206,17 +215,64 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, page string, dat
 	}
 	data["Page"] = page
 	data["Authed"] = s.validSession(r)
-	data["Flash"] = r.URL.Query().Get("msg")
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := t.ExecuteTemplate(w, "layout", data); err != nil {
-		log.Printf("render %s: %v", page, err)
+	if data["Flash"] == nil {
+		data["Flash"] = s.takeFlash(w, r)
 	}
+	var buf bytes.Buffer
+	if err := t.ExecuteTemplate(&buf, "layout", data); err != nil {
+		log.Printf("render %s: %v", page, err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	h := w.Header()
+	h.Set("Content-Type", "text/html; charset=utf-8")
+	if r.Method != http.MethodGet {
+		h.Set("HX-Push-Url", "false")
+	}
+	w.WriteHeader(status)
+	w.Write(buf.Bytes())
 }
 
-func redirect(w http.ResponseWriter, r *http.Request, path, msg string) {
-	if msg != "" {
-		path += "?msg=" + urlQueryEscape(msg)
+// errorPage shows an error inside the layout (htmx swaps every response in,
+// so a plain-text error would replace the whole page).
+func (s *Server) errorPage(w http.ResponseWriter, r *http.Request, status int, msg string) {
+	s.renderStatus(w, r, status, "error", map[string]any{"Title": http.StatusText(status), "Error": msg})
+}
+
+// Flash messages travel in a short-lived cookie, not the URL, so a link
+// can't put arbitrary text on a coolix page.
+func (s *Server) flashCookie() string {
+	if s.SecureCookies {
+		return "__Host-coolix_flash"
 	}
+	return "coolix_flash"
+}
+
+func (s *Server) setFlash(w http.ResponseWriter, msg string) {
+	if msg == "" {
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: s.flashCookie(), Value: base64.RawURLEncoding.EncodeToString([]byte(msg)),
+		Path: "/", MaxAge: 60, HttpOnly: true, Secure: s.SecureCookies, SameSite: http.SameSiteStrictMode,
+	})
+}
+
+func (s *Server) takeFlash(w http.ResponseWriter, r *http.Request) string {
+	c, err := r.Cookie(s.flashCookie())
+	if err != nil {
+		return ""
+	}
+	http.SetCookie(w, &http.Cookie{Name: s.flashCookie(), Value: "", Path: "/", MaxAge: -1, Secure: s.SecureCookies})
+	msg, err := base64.RawURLEncoding.DecodeString(c.Value)
+	if err != nil || len(msg) > 500 {
+		return ""
+	}
+	return string(msg)
+}
+
+func (s *Server) redirect(w http.ResponseWriter, r *http.Request, path, msg string) {
+	s.setFlash(w, msg)
 	http.Redirect(w, r, path, http.StatusSeeOther)
 }
 
@@ -225,7 +281,7 @@ func redirect(w http.ResponseWriter, r *http.Request, path, msg string) {
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	st, err := s.quiet().Status()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.errorPage(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
 	s.render(w, r, "dashboard", map[string]any{
@@ -249,11 +305,10 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		err = s.quiet().CreateApp(app)
 	}
 	if err != nil {
-		w.WriteHeader(http.StatusUnprocessableEntity)
-		s.render(w, r, "new", map[string]any{"Title": "New app", "App": app, "Error": err.Error()})
+		s.renderStatus(w, r, http.StatusUnprocessableEntity, "new", map[string]any{"Title": "New app", "App": app, "Error": err.Error()})
 		return
 	}
-	redirect(w, r, "/apps/"+app.Name, "App created. Deploy it to start it.")
+	s.redirect(w, r, "/apps/"+app.Name, "App created. Deploy it to start it.")
 }
 
 func (s *Server) appData(r *http.Request, name string) (map[string]any, error) {
@@ -290,7 +345,8 @@ func (s *Server) appData(r *http.Request, name string) (map[string]any, error) {
 		"Webhook":    token != "",
 		"WebhookURL": webhookURL(r, name),
 	}
-	if app.HasDatabase("postgres") {
+	// Polls only refresh the status and the job list; skip the backup query.
+	if app.HasDatabase("postgres") && r.URL.Query().Get("poll") == "" {
 		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 		defer cancel()
 		backups, err := e.Backups(ctx, name)
@@ -319,54 +375,53 @@ func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		data, derr := s.appData(r, name)
 		if derr != nil {
-			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			s.errorPage(w, r, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
 		data["App"], data["Error"] = app, err.Error()
-		w.WriteHeader(http.StatusUnprocessableEntity)
-		s.render(w, r, "app", data)
+		s.renderStatus(w, r, http.StatusUnprocessableEntity, "app", data)
 		return
 	}
-	redirect(w, r, "/apps/"+name, "Saved. Deploy to apply.")
+	s.redirect(w, r, "/apps/"+name, "Saved. Deploy to apply.")
 }
 
 func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if r.FormValue("confirm") != name {
-		redirect(w, r, "/apps/"+name, "Type the app name to confirm deletion.")
+		s.redirect(w, r, "/apps/"+name, "Type the app name to confirm deletion.")
 		return
 	}
 	if err := s.quiet().RemoveApp(name); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.errorPage(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
 	j := s.startDeploy("")
-	redirect(w, r, j.URL(), "")
+	s.redirect(w, r, j.URL(), "")
 }
 
 func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	key := strings.TrimSpace(r.FormValue("key"))
 	if err := s.quiet().SetSecret(name, key, r.FormValue("value")); err != nil {
-		redirect(w, r, "/apps/"+name, "Secret not saved: "+err.Error())
+		s.redirect(w, r, "/apps/"+name, "Secret not saved: "+err.Error())
 		return
 	}
-	redirect(w, r, "/apps/"+name, "Secret "+key+" saved. Deploy to apply.")
+	s.redirect(w, r, "/apps/"+name, "Secret "+key+" saved. Deploy to apply.")
 }
 
 func (s *Server) handleUnsetSecret(w http.ResponseWriter, r *http.Request) {
 	name, key := r.PathValue("name"), r.PathValue("key")
 	if err := s.quiet().UnsetSecret(name, key); err != nil {
-		redirect(w, r, "/apps/"+name, err.Error())
+		s.redirect(w, r, "/apps/"+name, err.Error())
 		return
 	}
-	redirect(w, r, "/apps/"+name, "Secret "+key+" removed. Deploy to apply.")
+	s.redirect(w, r, "/apps/"+name, "Secret "+key+" removed. Deploy to apply.")
 }
 
 func (s *Server) handleGenerations(w http.ResponseWriter, r *http.Request) {
 	gens, err := s.quiet().Generations()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.errorPage(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
 	// Newest first.
@@ -389,7 +444,7 @@ func (s *Server) startDeploy(app string) *Job {
 }
 
 func (s *Server) handleDeployAll(w http.ResponseWriter, r *http.Request) {
-	redirect(w, r, s.startDeploy("").URL(), "")
+	s.redirect(w, r, s.startDeploy("").URL(), "")
 }
 
 func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
@@ -398,7 +453,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	redirect(w, r, s.startDeploy(name).URL(), "")
+	s.redirect(w, r, s.startDeploy(name).URL(), "")
 }
 
 func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
@@ -410,7 +465,7 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
 	j := s.Jobs.Start(fmt.Sprintf("Roll back to generation %d", n), "", func(ctx context.Context, j *Job) error {
 		return s.engine(j).Rollback(ctx, n)
 	})
-	redirect(w, r, j.URL(), "")
+	s.redirect(w, r, j.URL(), "")
 }
 
 func (s *Server) job(r *http.Request) *Job {
@@ -582,10 +637,10 @@ func (s *Server) handleWebhookSettings(w http.ResponseWriter, r *http.Request) {
 	e := s.quiet()
 	if r.FormValue("action") == "disable" {
 		if err := e.DisableWebhook(name); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			s.errorPage(w, r, http.StatusInternalServerError, err.Error())
 			return
 		}
-		redirect(w, r, "/apps/"+name, "Webhook disabled.")
+		s.redirect(w, r, "/apps/"+name, "Webhook disabled.")
 		return
 	}
 	token, err := e.EnableWebhook(name)
@@ -595,7 +650,7 @@ func (s *Server) handleWebhookSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	data, err := s.appData(r, name)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.errorPage(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
 	// Shown once, on this response only: it's not put in a URL or a flash.
@@ -615,19 +670,15 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 	j := s.Jobs.Start("Back up "+name, name, func(ctx context.Context, j *Job) error {
 		return s.engine(j).Backup(ctx, name)
 	})
-	redirect(w, r, j.URL(), "")
+	s.redirect(w, r, j.URL(), "")
 }
 
 func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	name, file := r.PathValue("name"), r.PathValue("file")
-	if r.FormValue("confirm") != name {
-		redirect(w, r, "/apps/"+name, "Type the app name to confirm the restore.")
-		return
-	}
 	j := s.Jobs.Start("Restore "+name+" from "+file, name, func(ctx context.Context, j *Job) error {
 		return s.engine(j).Restore(ctx, name, file)
 	})
-	redirect(w, r, j.URL(), "")
+	s.redirect(w, r, j.URL(), "")
 }
 
 // webhookURL is where the forge should send deliveries, as seen by this

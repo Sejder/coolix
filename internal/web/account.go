@@ -26,6 +26,9 @@ type Account struct {
 	UserID       []byte    `json:"user_id"`
 	PasswordHash string    `json:"password_hash,omitempty"`
 	Passkeys     []Passkey `json:"passkeys,omitempty"`
+	// Salt is mixed into session signatures; a reset (or a new account)
+	// gets a new one, so earlier sessions can't come back.
+	Salt []byte `json:"salt"`
 	// Epoch is bumped whenever a credential is removed or the password
 	// changes; sessions signed under an older epoch are void.
 	Epoch int `json:"epoch"`
@@ -101,6 +104,12 @@ func (s *AccountStore) Update(change func(*Account) error) (*Account, error) {
 	}
 	if err := change(a); err != nil {
 		return nil, err
+	}
+	if len(a.Salt) == 0 {
+		a.Salt = make([]byte, 32)
+		if _, err := rand.Read(a.Salt); err != nil {
+			return nil, err
+		}
 	}
 	data, err := json.MarshalIndent(a, "", "  ")
 	if err != nil {
@@ -229,7 +238,7 @@ func clearSetupCode(stateDir string) { os.Remove(setupCodePath(stateDir)) }
 func ResetAccount(stateDir string) error {
 	s := &AccountStore{Path: filepath.Join(stateDir, "account.json")}
 	_, err := s.Update(func(a *Account) error {
-		a.PasswordHash, a.Passkeys = "", nil
+		a.PasswordHash, a.Passkeys, a.Salt = "", nil, nil
 		a.Epoch++
 		return nil
 	})

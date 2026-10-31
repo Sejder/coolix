@@ -6,6 +6,9 @@ let
   caddyDir = "/run/coolix/caddy";
   querySocket = "/run/coolix/query.sock";
   controlSocket = "/run/coolix/control.sock";
+  uiSocketPath = "/run/coolix/ui.sock";
+  uiSocket = cfg.ui.listen == null && cfg.caddy.enable;
+  uiListen = if cfg.ui.listen != null then cfg.ui.listen else "127.0.0.1:8090";
   # Rendered units call the (unwrapped) coolix binary through this stable
   # path, so upgrading coolix doesn't change, and restart, every app unit.
   execPath = "/etc/coolix/coolix";
@@ -30,7 +33,7 @@ let
     COOLIX_DEFAULT_TASKS_MAX = toString cfg.apps.defaultTasksMax;
     # The host's own Caddy sites can't be claimed by apps.
     COOLIX_RESERVED_DOMAINS = lib.concatStringsSep " " (lib.concatLists (lib.mapAttrsToList
-      (name: vh: lib.splitString "," name ++ vh.serverAliases)
+      (name: vh: lib.splitString "," name ++ lib.splitString "," vh.hostName ++ vh.serverAliases)
       config.services.caddy.virtualHosts));
   } // lib.optionalAttrs (cfg.apps.defaultMemoryMax != null) {
     COOLIX_DEFAULT_MEMORY_MAX = cfg.apps.defaultMemoryMax;
@@ -178,9 +181,17 @@ in
         description = "Run the web UI (`coolix serve`) as the coolix user.";
       };
       listen = lib.mkOption {
-        type = lib.types.str;
-        default = "127.0.0.1:8090";
-        description = "Address the web UI listens on. Keep it local and expose it through `ui.domain`.";
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "127.0.0.1:8090";
+        description = ''
+          TCP address for the web UI. By default (`null`) it listens on
+          `/run/coolix/ui.sock`, which only Caddy and root can open: apps share
+          the host network, and could otherwise reach the UI directly. Without
+          Caddy, the default is `127.0.0.1:8090`. For passkeys over an SSH
+          tunnel, forward `localhost:8090` to the socket
+          (`ssh -L 8090:/run/coolix/ui.sock host`).
+        '';
       };
       domain = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
@@ -216,6 +227,18 @@ in
         assertion = cfg.ui.domain != null -> cfg.caddy.enable;
         message = "services.coolix.ui.domain requires services.coolix.caddy.enable";
       }
+      {
+        assertion = cfg.portRange.to < 32768;
+        message = "services.coolix.portRange must end below 32768 (the kernel's ephemeral ports, which apps could otherwise grab)";
+      }
+      {
+        assertion = cfg.dataDir == null || !(lib.hasPrefix "${toString cfg.stateDir}/" "${toString cfg.dataDir}/");
+        message = "services.coolix.dataDir must not be inside stateDir (which the coolix user owns)";
+      }
+      {
+        assertion = !(lib.hasPrefix "${toString cfg.stateDir}/" "${toString cfg.secretsDir}/");
+        message = "services.coolix.secretsDir must not be inside stateDir (which the coolix user owns)";
+      }
     ];
 
     nix.settings.experimental-features = [ "nix-command" "flakes" ];
@@ -250,7 +273,7 @@ in
       description = "Create coolix data directories";
       unitConfig = {
         DefaultDependencies = false;
-        RequiresMountsFor = [ cfg.dataDir ];
+        RequiresMountsFor = [ "/var/lib" cfg.dataDir ];
       };
       wantedBy = [ "local-fs.target" ];
       before = map (d: "var-lib-private-coolix\\x2d${d}.mount") dataDirs ++ [ "local-fs.target" ];
@@ -299,11 +322,18 @@ in
     };
     systemd.services."coolix-control@" = {
       description = "coolix control request";
+      # Don't restart running requests on nixos-rebuild switch.
+      restartIfChanged = false;
       serviceConfig = {
         ExecStart = "${coolix}/bin/coolix control-serve";
         StandardInput = "socket";
         StandardOutput = "socket";
         StandardError = "journal";
+        ProtectHome = true;
+        PrivateTmp = true;
+        RestrictAddressFamilies = "AF_UNIX AF_INET AF_INET6 AF_NETLINK";
+        LockPersonality = true;
+        RestrictRealtime = true;
       };
     };
 
@@ -328,6 +358,7 @@ in
     };
     systemd.services."coolix-query@" = {
       description = "coolix query";
+      restartIfChanged = false;
       serviceConfig = {
         ExecStart = "${coolix}/bin/coolix query-serve";
         StandardInput = "socket";
@@ -367,6 +398,9 @@ in
     # older coolix only logs a warning: boot never fails because of coolix.
     systemd.services.coolix-activate-boot = {
       description = "Activate the current coolix app profile";
+      # Only at boot: on nixos-rebuild switch, running apps are left alone
+      # (units are re-rendered by the next deploy).
+      restartIfChanged = false;
       wantedBy = [ "multi-user.target" ];
       wants = [ "network-online.target" ] ++ lib.optional cfg.caddy.enable "caddy.service";
       after = [ "network-online.target" "local-fs.target" ] ++ lib.optional cfg.caddy.enable "caddy.service";
@@ -378,19 +412,31 @@ in
       };
     };
 
+    # The UI's socket: only root and Caddy can connect.
+    systemd.sockets.coolix = lib.mkIf (cfg.ui.enable && uiSocket) {
+      description = "coolix web UI socket";
+      wantedBy = [ "sockets.target" ];
+      listenStreams = [ uiSocketPath ];
+      socketConfig = {
+        SocketUser = "root";
+        SocketGroup = config.services.caddy.group;
+        SocketMode = "0660";
+      };
+    };
     systemd.services.coolix = lib.mkIf cfg.ui.enable {
       description = "coolix web UI";
       wantedBy = [ "multi-user.target" ];
-      after = [ "network.target" ];
+      requires = lib.optional uiSocket "coolix.socket";
+      after = [ "network.target" ] ++ lib.optional uiSocket "coolix.socket";
       environment = {
-        COOLIX_LISTEN = cfg.ui.listen;
+        COOLIX_LISTEN = if uiSocket then "" else uiListen;
         COOLIX_SECURE_COOKIES = if cfg.ui.domain != null && cfg.caddy.tls != "off" then "1" else "0";
         # Passkeys are bound to these origins: the UI's domain, and localhost
         # (e.g. through an SSH tunnel).
         COOLIX_WEBAUTHN_ORIGINS = lib.concatStringsSep " " (
           lib.optional (cfg.ui.domain != null)
             "${if cfg.caddy.tls == "off" then "http" else "https"}://${cfg.ui.domain}"
-          ++ [ "http://localhost:${lib.last (lib.splitString ":" cfg.ui.listen)}" ]
+          ++ [ "http://localhost:${if uiSocket then "8090" else lib.last (lib.splitString ":" uiListen)}" ]
         );
       } // lib.optionalAttrs (cfg.ui.adminPasswordFile != null) {
         COOLIX_ADMIN_PASSWORD_FILE = "%d/password";
@@ -440,7 +486,7 @@ in
       virtualHosts = lib.mkIf (cfg.ui.domain != null) {
         "${lib.optionalString (cfg.caddy.tls == "off") "http://"}${cfg.ui.domain}".extraConfig = ''
           ${lib.optionalString (cfg.caddy.tls == "internal") "tls internal"}
-          reverse_proxy ${cfg.ui.listen}
+          reverse_proxy ${if uiSocket then "unix/${uiSocketPath}" else uiListen}
         '';
       };
     };

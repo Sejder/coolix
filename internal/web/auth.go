@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -20,8 +21,8 @@ import (
 )
 
 const (
-	sessionCookie = "coolix_session"
-	sessionTTL    = 7 * 24 * time.Hour
+	sessionCookieName = "coolix_session"
+	sessionTTL        = 7 * 24 * time.Hour
 
 	// MinPasswordLength is enforced at startup.
 	MinPasswordLength = 12
@@ -79,7 +80,7 @@ func (s *Server) signingKey() ([]byte, error) {
 		}
 	}
 	m := hmac.New(sha256.New, s.SessionKey)
-	fmt.Fprintf(m, "%d\x00%s\x00%s", a.Epoch, a.PasswordHash, pw)
+	fmt.Fprintf(m, "%x\x00%d\x00%s\x00%s", a.Salt, a.Epoch, a.PasswordHash, pw)
 	return m.Sum(nil), nil
 }
 
@@ -101,7 +102,7 @@ func (s *Server) newSession() (*http.Cookie, error) {
 		return nil, err
 	}
 	return &http.Cookie{
-		Name:     sessionCookie,
+		Name:     s.sessionCookie(),
 		Value:    payload + "." + sig,
 		Path:     "/",
 		HttpOnly: true,
@@ -126,7 +127,7 @@ func (s *Server) notBefore() int64 {
 }
 
 func (s *Server) validSession(r *http.Request) bool {
-	c, err := r.Cookie(sessionCookie)
+	c, err := r.Cookie(s.sessionCookie())
 	if err != nil {
 		return false
 	}
@@ -180,30 +181,64 @@ func (s *Server) claimed() bool {
 	return err != nil || a.HasCredential() // on errors, fail closed
 }
 
-// clientIP is the address failed logins are counted against. Behind the
-// local Caddy, that's the last X-Forwarded-For entry (the one Caddy added).
+type ctxKey int
+
+const viaSocket ctxKey = 0
+
+// ConnContext marks requests that came in over the unix socket, which only
+// Caddy (and root) can connect to. Only their X-Forwarded-For is trusted:
+// apps share the host network and could otherwise forge it over TCP.
+func ConnContext(ctx context.Context, c net.Conn) context.Context {
+	return context.WithValue(ctx, viaSocket, c.LocalAddr().Network() == "unix")
+}
+
+// clientIP is the address failed logins are counted against: the address
+// Caddy saw (last X-Forwarded-For entry) for requests through the socket,
+// the peer otherwise. IPv6 addresses count per /64.
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
 	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+	if trusted, _ := r.Context().Value(viaSocket).(bool); trusted {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 			parts := strings.Split(xff, ",")
-			return strings.TrimSpace(parts[len(parts)-1])
+			host = strings.TrimSpace(parts[len(parts)-1])
 		}
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
+		return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
+	}
+	if host == "" || host == "@" {
+		return "local"
 	}
 	return host
 }
 
-// loginLimiter serializes password checks (so the 1s penalty per failure
-// caps guessing at about one attempt per second overall) and locks out a
-// client after too many failures.
+// loginLimiter locks a client out after too many failures, and bounds how
+// many (memory-hungry, argon2id) password checks run at once. Clients don't
+// queue behind each other's failures: the 1s penalty is per request.
 type loginLimiter struct {
-	check    sync.Mutex
 	mu       sync.Mutex
 	failures map[string][]time.Time
+	slots    chan struct{}
+	once     sync.Once
 }
+
+const maxConcurrentChecks = 4
+
+// acquire takes a check slot, waiting at most 5s.
+func (l *loginLimiter) acquire() bool {
+	l.once.Do(func() { l.slots = make(chan struct{}, maxConcurrentChecks) })
+	select {
+	case l.slots <- struct{}{}:
+		return true
+	case <-time.After(5 * time.Second):
+		return false
+	}
+}
+
+func (l *loginLimiter) release() { <-l.slots }
 
 func (l *loginLimiter) blocked(ip string, now time.Time) bool {
 	l.mu.Lock()
@@ -228,8 +263,18 @@ func (l *loginLimiter) fail(ip string, now time.Time) {
 	if l.failures == nil {
 		l.failures = map[string][]time.Time{}
 	}
-	if len(l.failures) > 10000 { // bound memory under a distributed attack
-		clear(l.failures)
+	if len(l.failures) > 10000 { // bound memory: forget expired clients first
+		for k, ts := range l.failures {
+			if len(ts) == 0 || now.Sub(ts[len(ts)-1]) >= failureWindow {
+				delete(l.failures, k)
+			}
+		}
+		for k := range l.failures { // still too many: forget arbitrary ones
+			if len(l.failures) <= 5000 {
+				break
+			}
+			delete(l.failures, k)
+		}
 	}
 	l.failures[ip] = append(l.failures[ip], now)
 }
@@ -251,10 +296,17 @@ func sameOrigin(r *http.Request) bool {
 func (s *Server) requireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && !sameOrigin(r) {
-			http.Error(w, "cross-origin request rejected", http.StatusForbidden)
+			s.errorPage(w, r, http.StatusForbidden, "cross-origin request rejected")
 			return
 		}
 		if !s.validSession(r) {
+			// htmx requests (polling, boosted links) get a full-page redirect
+			// instead of a login page swapped into a fragment.
+			if r.Header.Get("HX-Request") != "" {
+				w.Header().Set("HX-Redirect", "/login")
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
 			if !s.claimed() {
 				http.Redirect(w, r, "/setup", http.StatusSeeOther)
 				return
@@ -276,48 +328,75 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !sameOrigin(r) {
-		http.Error(w, "cross-origin request rejected", http.StatusForbidden)
+		s.errorPage(w, r, http.StatusForbidden, "cross-origin request rejected")
 		return
 	}
 	ip := clientIP(r)
 	if s.logins.blocked(ip, time.Now()) {
-		w.WriteHeader(http.StatusTooManyRequests)
-		s.render(w, r, "login", map[string]any{"Title": "Sign in", "Passkeys": s.webauthn != nil, "Error": "Too many failed attempts. Try again later."})
+		s.renderStatus(w, r, http.StatusTooManyRequests, "login", map[string]any{"Title": "Sign in", "Passkeys": s.webauthn != nil, "Error": "Too many failed attempts. Try again later."})
 		return
 	}
-	s.logins.check.Lock()
+	if !s.logins.acquire() {
+		s.renderStatus(w, r, http.StatusTooManyRequests, "login", map[string]any{"Title": "Sign in", "Passkeys": s.webauthn != nil, "Error": "Too busy. Try again in a moment."})
+		return
+	}
 	err := s.checkPassword(r.FormValue("password"))
+	s.logins.release()
 	if err != nil {
 		s.logins.fail(ip, time.Now())
-		time.Sleep(time.Second) // still holding check: one guess per second overall
+		time.Sleep(time.Second) // slow down guessing
 	}
-	s.logins.check.Unlock()
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		s.render(w, r, "login", map[string]any{"Title": "Sign in", "Passkeys": s.webauthn != nil, "Error": "Wrong password."})
+		s.renderStatus(w, r, http.StatusUnauthorized, "login", map[string]any{"Title": "Sign in", "Passkeys": s.webauthn != nil, "Error": "Wrong password."})
 		return
 	}
-	s.signIn(w, r, "/")
+	s.signIn(w, r, "/", "")
 }
 
 // handleLogout signs out every session (there is one admin).
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	now := strconv.FormatInt(time.Now().UnixNano(), 10)
 	if err := os.WriteFile(s.notBeforePath(), []byte(now+"\n"), 0o600); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.errorPage(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: s.sessionCookie(), Value: "", Path: "/", MaxAge: -1, Secure: s.SecureCookies})
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
-// signIn issues a session cookie and redirects to target.
-func (s *Server) signIn(w http.ResponseWriter, r *http.Request, target string) {
+// signIn issues a session cookie and redirects to target with a flash.
+func (s *Server) signIn(w http.ResponseWriter, r *http.Request, target, msg string) {
+	s.setFlash(w, msg)
 	cookie, err := s.newSession()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.errorPage(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
 	http.SetCookie(w, cookie)
 	http.Redirect(w, r, target, http.StatusSeeOther)
+}
+
+// sessionCookie uses the __Host- prefix over HTTPS, so an app on a sibling
+// subdomain can't plant a cookie that shadows it.
+func (s *Server) sessionCookie() string {
+	if s.SecureCookies {
+		return "__Host-" + sessionCookieName
+	}
+	return sessionCookieName
+}
+
+// recentAuth reports whether the session was issued in the last 15
+// minutes. Changing how one signs in requires it, so a stolen session can't
+// add its own passkey.
+func (s *Server) recentAuth(r *http.Request) bool {
+	c, err := r.Cookie(s.sessionCookie())
+	if err != nil {
+		return false
+	}
+	parts := strings.Split(c.Value, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	issued, err := strconv.ParseInt(parts[1], 10, 64)
+	return err == nil && time.Since(time.Unix(0, issued)) < 15*time.Minute
 }

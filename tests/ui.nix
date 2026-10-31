@@ -29,7 +29,7 @@ in
       flake-registry = "";
     };
     environment.etc."coolix-test-app".source = ./app;
-    environment.systemPackages = [ pkgs.curl pkgs.git pkgs.openssl pkgs.chromium pkgs.chromedriver python ];
+    environment.systemPackages = [ pkgs.curl pkgs.git pkgs.socat pkgs.openssl pkgs.chromium pkgs.chromedriver python ];
     fonts.packages = [ pkgs.inter pkgs.jetbrains-mono ];
 
     system.extraDependencies = [
@@ -64,6 +64,16 @@ in
     machine.succeed("coolix deploy >&2")
     machine.succeed("echo v2 > /srv/hello/VERSION")
     machine.succeed("coolix app set docs --env THEME=dark")
+
+    # The UI listens on a unix socket only Caddy and root can open. Selenium
+    # reaches it on localhost:8090, like an admin through an SSH tunnel
+    # (passkeys need localhost or HTTPS).
+    machine.succeed("systemd-run --unit=uitunnel ${pkgs.socat}/bin/socat TCP-LISTEN:8090,bind=127.0.0.1,fork,reuseaddr UNIX-CONNECT:/run/coolix/ui.sock")
+    machine.wait_for_open_port(8090)
+
+    with subtest("apps can't reach the UI except through Caddy"):
+        machine.succeed("test $(stat -c %G /run/coolix/ui.sock) = caddy")
+        machine.fail("systemd-run --quiet --wait --pipe -p DynamicUser=yes ${pkgs.curl}/bin/curl -sf --unix-socket /run/coolix/ui.sock http://x/healthz")
 
     with subtest("deploy from the browser and take screenshots"):
         machine.succeed("mkdir -p /tmp/screenshots")

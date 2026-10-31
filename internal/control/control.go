@@ -19,6 +19,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"coolix/internal/units"
 )
@@ -84,7 +85,7 @@ func (d *detachedWriter) Write(p []byte) (int, error) {
 // Serve handles one connection. log also receives all output (the
 // service's journal keeps an audit trail of what root did).
 func Serve(ctx context.Context, in io.Reader, out io.Writer, log io.Writer, h Handler) error {
-	line, err := bufio.NewReaderSize(io.LimitReader(in, 512), 512).ReadString('\n')
+	line, err := readRequest(in, 10*time.Second)
 	if err != nil {
 		return fmt.Errorf("reading request: %w", err)
 	}
@@ -92,7 +93,7 @@ func Serve(ctx context.Context, in io.Reader, out io.Writer, log io.Writer, h Ha
 	r, err := Parse(strings.TrimSpace(line))
 	if err == nil {
 		fmt.Fprintf(log, "request: %s\n", r)
-		err = h(ctx, r, w)
+		err = h(ctx, r, Sanitize(w))
 	}
 	if err != nil {
 		fmt.Fprintf(w, "%serror: %s\n", Trailer, strings.ReplaceAll(err.Error(), "\n", "; "))
@@ -167,4 +168,39 @@ func Do(ctx context.Context, socket string, r Request, w io.Writer) error {
 		return err
 	}
 	return tw.Result()
+}
+
+// Sanitize escapes what could forge a status trailer or split lines in the
+// web UI's event streams: output passes through it, the server's own
+// trailer doesn't.
+func Sanitize(w io.Writer) io.Writer { return sanitizer{w} }
+
+type sanitizer struct{ w io.Writer }
+
+var sanitizeReplacer = strings.NewReplacer(Trailer, "␞", "\r", "")
+
+func (s sanitizer) Write(p []byte) (int, error) {
+	if _, err := io.WriteString(s.w, sanitizeReplacer.Replace(string(p))); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+// readRequest reads the request line, giving up after timeout.
+func readRequest(in io.Reader, timeout time.Duration) (string, error) {
+	type result struct {
+		line string
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		line, err := bufio.NewReaderSize(io.LimitReader(in, 512), 512).ReadString('\n')
+		ch <- result{line, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.line, r.err
+	case <-time.After(timeout):
+		return "", errors.New("timed out waiting for a request")
+	}
 }

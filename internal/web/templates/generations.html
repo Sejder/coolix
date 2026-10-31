@@ -2,10 +2,10 @@
 <div class="pagehead">
   <div>
     <h1>Generations</h1>
-    <p class="sub">Every deploy is a Nix profile generation tied to a commit of the apps repo. Rolling back re-activates the old build without rebuilding, with the same blue/green switch as a deploy.</p>
+    <p class="sub">Each deploy is a numbered generation. Rolling back switches to an earlier one without rebuilding, with the same zero-downtime switch as a deploy.</p>
   </div>
 </div>
-<div class="card flush">
+<div class="card flush"><div class="tablewrap">
 <table>
   <thead><tr><th>#</th><th>Deployed</th><th>Revision</th><th>Apps</th><th></th></tr></thead>
   <tbody>
@@ -21,6 +21,6 @@
   <tr><td colspan="5" class="empty">No generations yet.</td></tr>
   {{end}}
   </tbody>
-</table>
+</table></div>
 </div>
 {{end}}

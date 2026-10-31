@@ -165,6 +165,11 @@ func (r *Repo) Adopt(clone *Repo, base, msg string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Keep every built commit reachable: generations refer to it, and a
+	// rollback restores the repo to it (git gc would prune it otherwise).
+	if err := r.git("update-ref", "refs/coolix/built/"+built, built); err != nil {
+		return "", err
+	}
 	head, err := r.Head()
 	if err != nil {
 		return "", err
