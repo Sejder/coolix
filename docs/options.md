@@ -25,6 +25,8 @@ All options live under `services.coolix`.
 | `ui.enable` | `true` | Run the web UI. |
 | `ui.listen` | `null` | TCP address for the UI. By default it listens on `/run/coolix/ui.sock`, which only Caddy and root can open (apps share the host network); without Caddy, `127.0.0.1:8090`. Over SSH: `ssh -L 8090:/run/coolix/ui.sock host`, then `http://localhost:8090` (passkeys work there too). |
 | `ui.domain` | `null` | Serve the UI through Caddy on this domain. Passkeys work there (over HTTPS) and on `http://localhost:<port>`. |
+| `ui.externalUrl` | `null` | The UI's public URL when your own reverse proxy (nginx, …) serves it instead of `ui.domain`, e.g. `https://coolix.example.com`. Passkeys work there, cookies are `Secure` for HTTPS, and apps can't claim the domain. |
+| `ui.socketGroup` | Caddy's group | Group that may open `/run/coolix/ui.sock`. For nginx: `"nginx"`, with `proxyPass = "http://unix:/run/coolix/ui.sock"`. Prefer this to `ui.listen`: apps share the host network and could reach a TCP port directly. |
 | `ui.adminPasswordFile` | `null` | Optional declarative admin password (12+ characters, e.g. from agenix or sops-nix), read via `LoadCredential`. Without it, the first visit shows a setup page that needs a code from `sudo coolix setup-code`. |
 
 Default `apps.allowedHardeningOverrides`: `MemoryDenyWriteExecute`,

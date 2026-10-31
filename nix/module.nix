@@ -7,7 +7,9 @@ let
   querySocket = "/run/coolix/query.sock";
   controlSocket = "/run/coolix/control.sock";
   uiSocketPath = "/run/coolix/ui.sock";
-  uiSocket = cfg.ui.listen == null && cfg.caddy.enable;
+  uiSocket = cfg.ui.listen == null && (cfg.caddy.enable || cfg.ui.socketGroup != null);
+  uiSocketGroup = if cfg.ui.socketGroup != null then cfg.ui.socketGroup else config.services.caddy.group;
+  externalUrl = if cfg.ui.externalUrl == null then null else lib.removeSuffix "/" cfg.ui.externalUrl;
   uiListen = if cfg.ui.listen != null then cfg.ui.listen else "127.0.0.1:8090";
   # Rendered units call the (unwrapped) coolix binary through this stable
   # path, so upgrading coolix doesn't change, and restart, every app unit.
@@ -34,7 +36,7 @@ let
     # The host's own Caddy sites can't be claimed by apps.
     COOLIX_RESERVED_DOMAINS = lib.concatStringsSep " " (lib.concatLists (lib.mapAttrsToList
       (name: vh: lib.splitString "," name ++ lib.splitString "," vh.hostName ++ vh.serverAliases)
-      config.services.caddy.virtualHosts));
+      config.services.caddy.virtualHosts) ++ lib.optional (externalUrl != null) externalUrl);
   } // lib.optionalAttrs (cfg.apps.defaultMemoryMax != null) {
     COOLIX_DEFAULT_MEMORY_MAX = cfg.apps.defaultMemoryMax;
   } // lib.optionalAttrs (cfg.ui.domain != null) {
@@ -231,6 +233,29 @@ in
         default = null;
         example = "coolix.example.com";
         description = "Serve the web UI on this domain through Caddy (requires `caddy.enable`).";
+      };
+      externalUrl = lib.mkOption {
+        type = lib.types.nullOr (lib.types.strMatching "https?://[A-Za-z0-9.-]+(:[0-9]+)?/?");
+        default = null;
+        example = "https://coolix.example.com";
+        description = ''
+          The UI's public URL when your own reverse proxy (e.g. nginx) serves
+          it instead of `ui.domain`. Passkeys work on this URL, cookies are
+          `Secure` when it's HTTPS, and apps can't claim its domain. Point the
+          proxy at the UI's socket (see `ui.socketGroup`) rather than a TCP
+          port: apps share the host network and could reach a TCP port
+          directly.
+        '';
+      };
+      socketGroup = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "nginx";
+        description = ''
+          Group that may connect to the UI's socket, `/run/coolix/ui.sock`
+          (default: Caddy's group). Set it to your reverse proxy's group,
+          e.g. `nginx` with `proxyPass = "http://unix:/run/coolix/ui.sock"`.
+        '';
       };
       adminPasswordFile = lib.mkOption {
         type = lib.types.nullOr lib.types.path;
@@ -485,7 +510,7 @@ in
       listenStreams = [ uiSocketPath ];
       socketConfig = {
         SocketUser = "root";
-        SocketGroup = config.services.caddy.group;
+        SocketGroup = uiSocketGroup;
         SocketMode = "0660";
       };
     };
@@ -496,11 +521,14 @@ in
       after = [ "network.target" ] ++ lib.optional uiSocket "coolix.socket";
       environment = {
         COOLIX_LISTEN = if uiSocket then "" else uiListen;
-        COOLIX_SECURE_COOKIES = if cfg.ui.domain != null && cfg.caddy.tls != "off" then "1" else "0";
+        COOLIX_SECURE_COOKIES =
+          if (cfg.ui.domain != null && cfg.caddy.tls != "off") || lib.hasPrefix "https://" (toString externalUrl)
+          then "1" else "0";
         # Passkeys are bound to these origins: the UI's domain, and localhost
         # (e.g. through an SSH tunnel).
         COOLIX_WEBAUTHN_ORIGINS = lib.concatStringsSep " " (
-          lib.optional (cfg.ui.domain != null)
+          lib.optional (externalUrl != null) externalUrl
+          ++ lib.optional (cfg.ui.domain != null)
             "${if cfg.caddy.tls == "off" then "http" else "https"}://${cfg.ui.domain}"
           ++ [ "http://localhost:${if uiSocket then "8090" else lib.last (lib.splitString ":" uiListen)}" ]
         );
