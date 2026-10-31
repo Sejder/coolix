@@ -1,5 +1,7 @@
 # coolix
 
+[![CI](https://github.com/Sejder/coolix/actions/workflows/ci.yml/badge.svg)](https://github.com/Sejder/coolix/actions/workflows/ci.yml)
+
 A NixOS-native self-hosting PaaS in the spirit of Coolify and Dokploy, minus
 the Docker: apps are Nix flakes, run as hardened systemd units, and everything
 deployed is recorded in a git repo.
@@ -27,7 +29,7 @@ deployed is recorded in a git repo.
 
 ```nix
 # flake.nix of your NixOS host
-inputs.coolix.url = "…";
+inputs.coolix.url = "github:Sejder/coolix";
 # in your configuration
 imports = [ inputs.coolix.nixosModules.default ];
 services.coolix.enable = true;
