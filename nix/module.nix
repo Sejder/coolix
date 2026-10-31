@@ -3,18 +3,28 @@
 
 let
   cfg = config.services.coolix;
+  caddyDir = "/run/coolix/caddy";
+
+  env = {
+    COOLIX_STATE_DIR = cfg.stateDir;
+    COOLIX_USER = "coolix";
+    COOLIX_NIXPKGS = "${pkgs.path}";
+    COOLIX_LIB = "${self}";
+    COOLIX_SYSTEM = pkgs.stdenv.hostPlatform.system;
+    COOLIX_PORT_MIN = toString cfg.portRange.from;
+    COOLIX_PORT_MAX = toString cfg.portRange.to;
+    COOLIX_DRAIN = cfg.drainTime;
+    COOLIX_KEEP_GENERATIONS = toString cfg.keepGenerations;
+  } // lib.optionalAttrs cfg.caddy.enable {
+    COOLIX_CADDY_DIR = caddyDir;
+    COOLIX_TLS = cfg.caddy.tls;
+  };
 
   # The CLI is wrapped with everything it needs to know about this host:
   # which nixpkgs/coolix lib the apps repo pins, and the tools it shells out to.
   coolix = pkgs.runCommand "coolix-wrapped" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
     makeWrapper ${lib.getExe cfg.package} $out/bin/coolix \
-      --set COOLIX_STATE_DIR ${cfg.stateDir} \
-      --set COOLIX_USER coolix \
-      --set COOLIX_NIXPKGS ${pkgs.path} \
-      --set COOLIX_LIB ${self} \
-      --set COOLIX_SYSTEM ${pkgs.stdenv.hostPlatform.system} \
-      --set COOLIX_PORT_MIN ${toString cfg.portRange.from} \
-      --set COOLIX_PORT_MAX ${toString cfg.portRange.to} \
+      ${lib.concatStringsSep " " (lib.mapAttrsToList (k: v: "--set ${k} ${lib.escapeShellArg v}") env)} \
       --prefix PATH : ${lib.makeBinPath [ pkgs.git pkgs.util-linux config.nix.package config.systemd.package ]}
   '';
 in
@@ -47,13 +57,91 @@ in
         description = "Last port coolix may allocate to apps.";
       };
     };
+
+    drainTime = lib.mkOption {
+      type = lib.types.str;
+      default = "2s";
+      description = "How long the old slot keeps running after traffic moved to the new one (Go duration).";
+    };
+
+    keepGenerations = lib.mkOption {
+      type = lib.types.ints.unsigned;
+      default = 20;
+      description = "App profile generations to keep for rollback; older ones become garbage-collectable. 0 keeps all.";
+    };
+
+    caddy = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = "Route app domains through Caddy (enables services.caddy).";
+      };
+      tls = lib.mkOption {
+        type = lib.types.enum [ "acme" "internal" "off" ];
+        default = "acme";
+        description = ''
+          How app domains get certificates: `acme` (Let's Encrypt/ZeroSSL via
+          Caddy's automatic HTTPS), `internal` (Caddy's local CA) or `off`
+          (plain HTTP).
+        '';
+      };
+      acmeEmail = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Contact email for ACME certificates.";
+      };
+      openFirewall = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = "Open ports 80 and 443.";
+      };
+    };
+
+    ui = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = "Run the web UI (`coolix serve`) as the coolix user.";
+      };
+      listen = lib.mkOption {
+        type = lib.types.str;
+        default = "127.0.0.1:8090";
+        description = "Address the web UI listens on. Keep it local and expose it through `ui.domain`.";
+      };
+      domain = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "coolix.example.com";
+        description = "Serve the web UI on this domain through Caddy (requires `caddy.enable`).";
+      };
+      adminPasswordFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        example = "/run/secrets/coolix-admin-password";
+        description = ''
+          File containing the admin password for the web UI. Read through
+          systemd's LoadCredential, so it may be root-only (e.g. from sops-nix
+          or agenix). Don't use a path inside the Nix store.
+        '';
+      };
+    };
   };
 
   config = lib.mkIf cfg.enable {
-    assertions = [{
-      assertion = cfg.portRange.from < cfg.portRange.to;
-      message = "services.coolix.portRange.from must be lower than portRange.to";
-    }];
+    assertions = [
+      {
+        assertion = cfg.portRange.from < cfg.portRange.to;
+        message = "services.coolix.portRange.from must be lower than portRange.to";
+      }
+      {
+        assertion = cfg.ui.enable -> cfg.ui.adminPasswordFile != null;
+        message = "services.coolix.ui.adminPasswordFile must be set when the web UI is enabled";
+      }
+      {
+        assertion = cfg.ui.domain != null -> cfg.caddy.enable;
+        message = "services.coolix.ui.domain requires services.coolix.caddy.enable";
+      }
+    ];
 
     nix.settings.experimental-features = [ "nix-command" "flakes" ];
 
@@ -74,7 +162,9 @@ in
     systemd.tmpfiles.rules = [
       "d ${cfg.stateDir} 0750 coolix coolix -"
       "d /nix/var/nix/profiles/coolix 0755 root root -"
-    ];
+      # Encrypted app secrets; written only by the root activator.
+      "d /var/lib/coolix-secrets 0700 root root -"
+    ] ++ lib.optional cfg.caddy.enable "d ${caddyDir} 0755 root root -";
 
     # Privileged half of a deploy. The instance is the profile's store path
     # basename; `coolix activate-store` validates it before touching anything.
@@ -103,7 +193,8 @@ in
     systemd.services.coolix-activate-boot = {
       description = "Activate the current coolix app profile";
       wantedBy = [ "multi-user.target" ];
-      after = [ "network.target" "local-fs.target" ];
+      wants = lib.optional cfg.caddy.enable "caddy.service";
+      after = [ "network.target" "local-fs.target" ] ++ lib.optional cfg.caddy.enable "caddy.service";
       unitConfig.ConditionPathExists = "/nix/var/nix/profiles/coolix/apps";
       serviceConfig = {
         Type = "oneshot";
@@ -111,5 +202,51 @@ in
         ExecStart = "${coolix}/bin/coolix activate";
       };
     };
+
+    systemd.services.coolix = lib.mkIf cfg.ui.enable {
+      description = "coolix web UI";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "network.target" ];
+      environment = {
+        COOLIX_LISTEN = cfg.ui.listen;
+        COOLIX_ADMIN_PASSWORD_FILE = "%d/password";
+        COOLIX_SECURE_COOKIES = if cfg.ui.domain != null && cfg.caddy.tls != "off" then "1" else "0";
+      };
+      serviceConfig = {
+        User = "coolix";
+        Group = "coolix";
+        ExecStart = "${coolix}/bin/coolix serve";
+        LoadCredential = "password:${cfg.ui.adminPasswordFile}";
+        Restart = "on-failure";
+        # Builds go through the nix daemon and activation through polkit, so
+        # the UI itself needs very little.
+        NoNewPrivileges = true;
+        PrivateTmp = true;
+        PrivateDevices = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        ReadWritePaths = [ cfg.stateDir ];
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectControlGroups = true;
+        RestrictSUIDSGID = true;
+        LockPersonality = true;
+      };
+    };
+
+    services.caddy = lib.mkIf cfg.caddy.enable {
+      enable = true;
+      email = cfg.caddy.acmeEmail;
+      extraConfig = ''
+        import ${caddyDir}/*.caddy
+      '';
+      virtualHosts = lib.mkIf (cfg.ui.domain != null) {
+        "${lib.optionalString (cfg.caddy.tls == "off") "http://"}${cfg.ui.domain}".extraConfig = ''
+          ${lib.optionalString (cfg.caddy.tls == "internal") "tls internal"}
+          reverse_proxy ${cfg.ui.listen}
+        '';
+      };
+    };
+    networking.firewall.allowedTCPPorts = lib.mkIf (cfg.caddy.enable && cfg.caddy.openFirewall) [ 80 443 ];
   };
 }

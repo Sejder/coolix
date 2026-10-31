@@ -78,3 +78,28 @@ func TestAllocatePort(t *testing.T) {
 		t.Fatal("expected exhaustion error")
 	}
 }
+
+func TestValidateDatabasesAndSecrets(t *testing.T) {
+	a := valid()
+	a.Databases = []Database{{Kind: "postgres", Version: "18"}, {Kind: "redis"}}
+	a.Secrets = []string{"API_KEY"}
+	if err := a.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]func(*App){
+		"unknown kind":    func(a *App) { a.Databases = []Database{{Kind: "mysql"}} },
+		"duplicate":       func(a *App) { a.Databases = []Database{{Kind: "redis"}, {Kind: "redis"}} },
+		"bad version":     func(a *App) { a.Databases = []Database{{Kind: "postgres", Version: "18; rm"}} },
+		"redis version":   func(a *App) { a.Databases = []Database{{Kind: "redis", Version: "7"}} },
+		"reserved secret": func(a *App) { a.Secrets = []string{"DATABASE_URL"} },
+		"secret is env":   func(a *App) { a.Secrets = []string{"A"}; a.Env = map[string]string{"A": "x"} },
+		"reserved db env": func(a *App) { a.Env = map[string]string{"PGHOST": "x"} },
+	}
+	for name, mutate := range cases {
+		a := valid()
+		mutate(a)
+		if err := a.Validate(); err == nil {
+			t.Errorf("%s: expected error", name)
+		}
+	}
+}

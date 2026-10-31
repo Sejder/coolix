@@ -1,0 +1,42 @@
+{{define "layout"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}} · coolix</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="/static/logo.svg">
+  <script src="/static/app.js" defer></script>
+</head>
+<body class="page-{{.Page}}">
+  {{if .Authed}}
+  <header class="topbar">
+    <a class="brand" href="/"><img src="/static/logo.svg" alt="" width="22" height="22"> coolix</a>
+    <nav>
+      <a href="/" {{if or (eq .Page "dashboard") (eq .Page "app") (eq .Page "new")}}class="active"{{end}}>Apps</a>
+      <a href="/generations" {{if eq .Page "generations"}}class="active"{{end}}>Generations</a>
+    </nav>
+    <form method="post" action="/logout"><button class="link">Sign out</button></form>
+  </header>
+  {{end}}
+  <main>
+    {{if .Flash}}<div class="flash">{{.Flash}}</div>{{end}}
+    {{if .Error}}<div class="flash error">{{.Error}}</div>{{end}}
+    {{template "content" .}}
+  </main>
+</body>
+</html>{{end}}
+
+{{define "slot"}}{{if .Slot}}<span class="pill live"><i></i>{{.Slot}} · :{{.Port}}</span>{{else if .Deployed}}<span class="pill down"><i></i>stopped</span>{{else}}<span class="pill idle"><i></i>not deployed</span>{{end}}{{end}}
+
+{{define "jobstate"}}<span class="pill job-{{.}}" data-job-state><i></i>{{.}}</span>{{end}}
+
+{{define "jobs"}}
+<ul class="jobs">
+  {{range .}}
+  <li><a href="{{.URL}}">{{template "jobstate" .State}} <span>{{.Title}}</span> <time>{{ago .Started}} · {{.Duration}}</time></a></li>
+  {{else}}
+  <li class="muted">No deploys since coolix started.</li>
+  {{end}}
+</ul>
+{{end}}

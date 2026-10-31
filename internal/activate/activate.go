@@ -1,35 +1,51 @@
 // Package activate switches the running system to an app profile: it links
-// the profile's units into a runtime unit dir and (re)starts what changed.
+// the profile's units into a runtime unit dir, (re)starts plain services such
+// as databases, and moves apps to their new version with blue/green slots.
 package activate
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 const (
 	DefaultProfile = "/nix/var/nix/profiles/coolix/apps"
 	DefaultUnitDir = "/run/systemd/system"
-	unitPrefix     = "coolix-app-"
+	appPrefix      = "coolix-app-"
+	dbPrefix       = "coolix-db-"
 )
+
+var Slots = [2]string{"blue", "green"}
+
+type Health struct {
+	Path    string `json:"path"`
+	Timeout string `json:"timeout"`
+}
 
 type AppManifest struct {
 	Unit    string         `json:"unit"`
 	Ports   map[string]int `json:"ports"`
 	Domains []string       `json:"domains"`
-	Health  map[string]any `json:"health"`
+	Health  Health         `json:"health"`
+	// Secrets is true when the unit loads /var/lib/coolix-secrets/<app>.cred.
+	Secrets bool `json:"secrets"`
 }
 
 type Manifest struct {
 	Version int                    `json:"version"`
 	Rev     string                 `json:"rev"`
 	Apps    map[string]AppManifest `json:"apps"`
+	// Services are plain (non-slotted) units such as per-app databases.
+	Services []string `json:"services"`
 }
 
 func ReadManifest(profile string) (*Manifest, error) {
@@ -53,6 +69,7 @@ type Systemd interface {
 	Restart(unit string) error
 	Start(unit string) error
 	Stop(unit string) error
+	IsActive(unit string) bool
 }
 
 type Systemctl struct{}
@@ -68,29 +85,60 @@ func (s Systemctl) DaemonReload() error       { return s.run("daemon-reload") }
 func (s Systemctl) Restart(unit string) error { return s.run("restart", unit) }
 func (s Systemctl) Start(unit string) error   { return s.run("start", unit) }
 func (s Systemctl) Stop(unit string) error    { return s.run("stop", unit) }
+func (s Systemctl) IsActive(unit string) bool {
+	return exec.Command("systemctl", "is-active", "--quiet", unit).Run() == nil
+}
+
+// Router points app domains at a slot's port (see package caddy).
+type Router interface {
+	SetRoute(app string, domains []string, port int) error
+	RemoveRoute(app string) error
+}
 
 type Activator struct {
 	UnitDir string
 	Systemd Systemd
-	Log     func(format string, args ...any)
+	Router  Router // nil disables routing
+	// Health probes a slot once; nil means "always healthy".
+	Health func(ctx context.Context, port int, path string) error
+	// Drain is how long the old slot keeps running after traffic moved.
+	Drain time.Duration
+	// ForceRestart lists apps to move to a fresh slot even if their unit is
+	// unchanged (e.g. their secrets changed).
+	ForceRestart map[string]bool
+	Log          func(format string, args ...any)
+	// Now/Sleep are overridable for tests.
+	Sleep func(time.Duration)
+	Now   func() time.Time
 }
 
-// Result reports what an activation did, per app name.
 type Result struct {
-	Started, Restarted, Unchanged, Removed []string
+	Started, Switched, Unchanged, Removed, Failed []string
 }
 
-// slotUnit is the running instance for an app. M1 always uses the blue slot;
-// blue/green switching replaces this.
-func slotUnit(app string) string { return unitPrefix + app + "@blue.service" }
+func SlotUnit(app, slot string) string { return appPrefix + app + "@" + slot + ".service" }
 
 func appFromUnit(unit string) string {
-	return strings.TrimSuffix(strings.TrimPrefix(unit, unitPrefix), "@.service")
+	return strings.TrimSuffix(strings.TrimPrefix(unit, appPrefix), "@.service")
 }
 
-// Activate makes the profile at profileDir live. profileDir should be a
-// resolved store path (or the profile symlink).
-func (a *Activator) Activate(profileDir string) (*Result, error) {
+func isAppUnit(n string) bool {
+	return strings.HasPrefix(n, appPrefix) && strings.HasSuffix(n, "@.service")
+}
+func isDBUnit(n string) bool {
+	return strings.HasPrefix(n, dbPrefix) && strings.HasSuffix(n, ".service")
+}
+
+type state int
+
+const (
+	unchanged state = iota
+	added
+	changed
+)
+
+// Activate makes the profile at profileDir live.
+func (a *Activator) Activate(ctx context.Context, profileDir string) (*Result, error) {
 	profileDir, err := filepath.EvalSymlinks(profileDir)
 	if err != nil {
 		return nil, err
@@ -102,89 +150,207 @@ func (a *Activator) Activate(profileDir string) (*Result, error) {
 	if err := os.MkdirAll(a.UnitDir, 0o755); err != nil {
 		return nil, err
 	}
-
 	current, err := a.linkedUnits()
 	if err != nil {
 		return nil, err
 	}
 
-	res := &Result{}
-	wanted := map[string]bool{}
-	changed := map[string]bool{}
-	for name, app := range m.Apps {
-		wanted[app.Unit] = true
-		src := filepath.Join(profileDir, "units", app.Unit)
+	// Classify and link every unit in the profile.
+	units, err := os.ReadDir(filepath.Join(profileDir, "units"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	states := map[string]state{}
+	for _, e := range units {
+		unit := e.Name()
+		src := filepath.Join(profileDir, "units", unit)
 		newData, err := os.ReadFile(src)
 		if err != nil {
-			return nil, fmt.Errorf("app %s: %w", name, err)
+			return nil, err
 		}
-		oldTarget, linked := current[app.Unit]
-		if linked {
+		st := added
+		if old, ok := current[unit]; ok {
+			st = changed
 			// Compare contents, not paths: every profile has a new store path.
-			if oldData, err := os.ReadFile(oldTarget); err == nil && bytes.Equal(oldData, newData) {
-				res.Unchanged = append(res.Unchanged, name)
-				if err := a.link(src, app.Unit); err != nil {
-					return nil, err
-				}
-				continue
+			if oldData, err := os.ReadFile(old); err == nil && bytes.Equal(oldData, newData) {
+				st = unchanged
 			}
 		}
-		changed[name] = linked
-		if err := a.link(src, app.Unit); err != nil {
+		states[unit] = st
+		if err := a.link(src, unit); err != nil {
 			return nil, err
 		}
 	}
 
-	// Stop removed apps before their unit files disappear.
-	for unit := range current {
-		if wanted[unit] {
+	res := &Result{}
+	// Stop and unlink whatever the profile no longer contains.
+	for _, unit := range sortedKeys(current) {
+		if _, ok := states[unit]; ok {
 			continue
 		}
-		name := appFromUnit(unit)
-		a.logf("stopping removed app %s", name)
-		if err := a.Systemd.Stop(slotUnit(name)); err != nil {
-			a.logf("warning: %v", err)
+		if isAppUnit(unit) {
+			name := appFromUnit(unit)
+			a.logf("stopping removed app %s", name)
+			for _, s := range Slots {
+				a.warn(a.Systemd.Stop(SlotUnit(name, s)))
+			}
+			if a.Router != nil {
+				a.warn(a.Router.RemoveRoute(name))
+			}
+			res.Removed = append(res.Removed, name)
+		} else {
+			a.logf("stopping removed service %s", unit)
+			a.warn(a.Systemd.Stop(unit))
 		}
 		if err := os.Remove(filepath.Join(a.UnitDir, unit)); err != nil {
 			return nil, err
 		}
-		res.Removed = append(res.Removed, name)
 	}
 
 	if err := a.Systemd.DaemonReload(); err != nil {
 		return nil, err
 	}
 
-	var errs []string
-	for _, name := range sortedKeys(changed) {
-		if changed[name] {
-			a.logf("restarting %s", name)
-			if err := a.Systemd.Restart(slotUnit(name)); err != nil {
-				errs = append(errs, err.Error())
+	var errs []error
+	// Databases first: apps depend on them.
+	for _, svc := range m.Services {
+		var err error
+		switch states[svc] {
+		case changed:
+			a.logf("restarting %s", svc)
+			err = a.Systemd.Restart(svc)
+		default:
+			err = a.Systemd.Start(svc)
+		}
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	relink := false
+	for _, name := range sortedKeys(m.Apps) {
+		app := m.Apps[name]
+		st := states[app.Unit]
+		if st == unchanged && !a.ForceRestart[name] {
+			if err := a.ensureRunning(ctx, name, app); err != nil {
+				errs = append(errs, fmt.Errorf("app %s: %w", name, err))
+				res.Failed = append(res.Failed, name)
 				continue
 			}
-			res.Restarted = append(res.Restarted, name)
+			res.Unchanged = append(res.Unchanged, name)
+			continue
+		}
+		had := a.activeSlot(name) != ""
+		if err := a.switchSlot(ctx, name, app); err != nil {
+			errs = append(errs, fmt.Errorf("app %s: %w", name, err))
+			res.Failed = append(res.Failed, name)
+			// Put the previous unit back so the old slot's restarts keep running old code.
+			if old, ok := current[app.Unit]; ok && st != unchanged {
+				a.warn(a.link(old, app.Unit))
+			} else if st == added {
+				a.warn(os.Remove(filepath.Join(a.UnitDir, app.Unit)))
+			}
+			relink = true
+			continue
+		}
+		if had {
+			res.Switched = append(res.Switched, name)
 		} else {
-			a.logf("starting %s", name)
-			if err := a.Systemd.Start(slotUnit(name)); err != nil {
-				errs = append(errs, err.Error())
-				continue
-			}
 			res.Started = append(res.Started, name)
 		}
 	}
-	// Unchanged apps may not be running (e.g. after a crash); start is idempotent.
-	for _, name := range res.Unchanged {
-		if err := a.Systemd.Start(slotUnit(name)); err != nil {
-			errs = append(errs, err.Error())
+	if relink {
+		a.warn(a.Systemd.DaemonReload())
+	}
+	return res, errors.Join(errs...)
+}
+
+// activeSlot returns the running slot of app, or "".
+func (a *Activator) activeSlot(app string) string {
+	for _, s := range Slots {
+		if a.Systemd.IsActive(SlotUnit(app, s)) {
+			return s
 		}
 	}
-	sort.Strings(res.Unchanged)
-	sort.Strings(res.Removed)
-	if len(errs) > 0 {
-		return res, fmt.Errorf("activation finished with errors:\n%s", strings.Join(errs, "\n"))
+	return ""
+}
+
+// switchSlot starts the idle slot, waits until it's healthy, routes traffic
+// to it and stops the old one. On failure the old slot is left untouched.
+func (a *Activator) switchSlot(ctx context.Context, name string, app AppManifest) error {
+	old := a.activeSlot(name)
+	next := Slots[0]
+	if old == Slots[0] {
+		next = Slots[1]
 	}
-	return res, nil
+	unit := SlotUnit(name, next)
+	port := app.Ports[next]
+	a.logf("%s: starting %s slot on port %d", name, next, port)
+	if err := a.Systemd.Restart(unit); err != nil {
+		return err
+	}
+	if err := a.waitHealthy(ctx, unit, port, app.Health); err != nil {
+		a.logf("%s: %s slot unhealthy, stopping it: %v", name, next, err)
+		a.warn(a.Systemd.Stop(unit))
+		if old != "" {
+			a.logf("%s: %s slot keeps serving", name, old)
+		}
+		return err
+	}
+	if a.Router != nil {
+		if err := a.Router.SetRoute(name, app.Domains, port); err != nil {
+			a.warn(a.Systemd.Stop(unit))
+			return err
+		}
+	}
+	if old != "" {
+		a.sleep(a.Drain)
+		a.logf("%s: stopping %s slot", name, old)
+		a.warn(a.Systemd.Stop(SlotUnit(name, old)))
+	}
+	return nil
+}
+
+// ensureRunning brings an unchanged app up if nothing is running (e.g. at
+// boot) and makes sure its route exists.
+func (a *Activator) ensureRunning(ctx context.Context, name string, app AppManifest) error {
+	slot := a.activeSlot(name)
+	if slot == "" {
+		return a.switchSlot(ctx, name, app)
+	}
+	if a.Router != nil {
+		return a.Router.SetRoute(name, app.Domains, app.Ports[slot])
+	}
+	return nil
+}
+
+func (a *Activator) waitHealthy(ctx context.Context, unit string, port int, h Health) error {
+	timeout := 30 * time.Second
+	if h.Timeout != "" {
+		if d, err := time.ParseDuration(h.Timeout); err == nil {
+			timeout = d
+		}
+	}
+	if a.Health == nil {
+		return nil
+	}
+	deadline := a.now().Add(timeout)
+	var last error
+	for {
+		if last = a.Health(ctx, port, h.Path); last == nil {
+			return nil
+		}
+		if a.now().After(deadline) {
+			if !a.Systemd.IsActive(unit) {
+				return fmt.Errorf("health check timed out after %s (%s is not running; see journalctl -u %s): %w", timeout, unit, unit, last)
+			}
+			return fmt.Errorf("health check timed out after %s: %w", timeout, last)
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		a.sleep(500 * time.Millisecond)
+	}
 }
 
 // linkedUnits returns coolix unit links currently in UnitDir, name -> target.
@@ -196,7 +362,7 @@ func (a *Activator) linkedUnits() (map[string]string, error) {
 	out := map[string]string{}
 	for _, e := range entries {
 		n := e.Name()
-		if !strings.HasPrefix(n, unitPrefix) || !strings.HasSuffix(n, "@.service") {
+		if !isAppUnit(n) && !isDBUnit(n) {
 			continue
 		}
 		target, err := os.Readlink(filepath.Join(a.UnitDir, n))
@@ -219,9 +385,23 @@ func (a *Activator) link(src, unit string) error {
 	return os.Rename(tmp, dst)
 }
 
+func (a *Activator) sleep(d time.Duration) {
+	if a.Sleep != nil {
+		a.Sleep(d)
+	} else {
+		time.Sleep(d)
+	}
+}
+
 func (a *Activator) logf(format string, args ...any) {
 	if a.Log != nil {
 		a.Log(format, args...)
+	}
+}
+
+func (a *Activator) warn(err error) {
+	if err != nil {
+		a.logf("warning: %v", err)
 	}
 }
 
@@ -232,4 +412,11 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+func (a *Activator) now() time.Time {
+	if a.Now != nil {
+		return a.Now()
+	}
+	return time.Now()
 }

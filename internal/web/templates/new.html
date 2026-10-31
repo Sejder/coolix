@@ -1,0 +1,9 @@
+{{define "content"}}
+<div class="pagehead"><h1>New app</h1></div>
+<form method="post" action="/apps" class="card form narrow">
+  <label>Name <small>lowercase letters, digits and dashes</small>
+    <input name="name" value="{{.App.Name}}" required pattern="[a-z][a-z0-9\-]*[a-z0-9]" autofocus spellcheck="false"></label>
+  {{template "appfields" .App}}
+  <div class="formactions"><a href="/" class="button">Cancel</a><button class="primary">Create app</button></div>
+</form>
+{{end}}

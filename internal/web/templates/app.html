@@ -1,0 +1,59 @@
+{{define "content"}}
+<div class="pagehead">
+  <div>
+    <h1>{{.App.Name}} {{template "slot" .AppState}}</h1>
+    <p class="sub">
+      {{range .App.Domains}}<a class="domain" href="https://{{.}}" rel="noopener">{{.}}</a> {{end}}
+      <code class="src">{{.App.Source}}</code>
+    </p>
+  </div>
+  <div class="actions">
+    <form method="post" action="/apps/{{.App.Name}}/deploy"><button class="primary">Deploy</button></form>
+  </div>
+</div>
+
+<div class="grid">
+  <form method="post" action="/apps/{{.App.Name}}" class="card form">
+    <h2>Settings</h2>
+    {{template "appfields" .App}}
+    <div class="formactions"><button>Save</button></div>
+  </form>
+
+  <div class="side">
+    <section class="card">
+      <h2>Secrets</h2>
+      <p class="muted small">Encrypted with systemd-creds and handed to the app as environment variables. Values are write-only; they never enter git or the Nix store.</p>
+      <ul class="secrets">
+        {{range .Secrets}}
+        <li><code>{{.Name}}</code>{{if .Pending}} <span class="pill warnpill">not deployed</span>{{end}}
+          <form method="post" action="/apps/{{$.App.Name}}/secrets/{{.Name}}/delete" data-confirm="Remove secret {{.Name}}?"><button class="link danger">remove</button></form></li>
+        {{else}}
+        <li class="muted">No secrets.</li>
+        {{end}}
+      </ul>
+      <form method="post" action="/apps/{{.App.Name}}/secrets" class="inline">
+        <input name="key" placeholder="API_KEY" required pattern="[A-Za-z_][A-Za-z0-9_]*" spellcheck="false" aria-label="Secret name">
+        <input name="value" type="password" placeholder="value" autocomplete="off" aria-label="Secret value">
+        <button>Set</button>
+      </form>
+    </section>
+
+    <section class="card flush">
+      <h2 class="pad">Deploys</h2>
+      {{template "jobs" .Jobs}}
+    </section>
+
+    <section class="card dangerzone">
+      <h2>Delete app</h2>
+      <p class="muted small">Stops both slots and removes the route. Data in <code>/var/lib/coolix-apps/{{.App.Name}}</code> and its databases is kept.</p>
+      <form method="post" action="/apps/{{.App.Name}}/delete" class="inline">
+        <input name="confirm" placeholder="type {{.App.Name}}" required spellcheck="false" aria-label="Confirm app name">
+        <button class="danger">Delete</button>
+      </form>
+    </section>
+  </div>
+</div>
+
+<h2>Logs</h2>
+<pre class="log" data-stream="/apps/{{.App.Name}}/logs" data-autoscroll></pre>
+{{end}}

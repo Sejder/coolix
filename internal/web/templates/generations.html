@@ -1,0 +1,26 @@
+{{define "content"}}
+<div class="pagehead">
+  <div>
+    <h1>Generations</h1>
+    <p class="sub">Every deploy is a Nix profile generation tied to a commit of the apps repo. Rolling back re-activates the old build without rebuilding, with the same blue/green switch as a deploy.</p>
+  </div>
+</div>
+<div class="card flush">
+<table>
+  <thead><tr><th>#</th><th>Deployed</th><th>Revision</th><th>Apps</th><th></th></tr></thead>
+  <tbody>
+  {{range .Generations}}
+  <tr {{if .Current}}class="current"{{end}}>
+    <td><b>{{.Number}}</b></td>
+    <td>{{ago .Time}} <span class="muted small">{{.Time.Format "2006-01-02 15:04"}}</span></td>
+    <td><code>{{shortRev .Rev}}</code></td>
+    <td>{{join .Apps ", "}}</td>
+    <td class="right">{{if .Current}}<span class="pill live"><i></i>current</span>{{else}}<form method="post" action="/generations/{{.Number}}/rollback" data-confirm="Roll back to generation {{.Number}}?"><button class="small">Roll back</button></form>{{end}}</td>
+  </tr>
+  {{else}}
+  <tr><td colspan="5" class="empty">No generations yet.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+{{end}}

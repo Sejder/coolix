@@ -1,0 +1,22 @@
+{{define "appfields"}}
+<label>Source <small>flake reference</small>
+  <input name="source" value="{{.Source}}" placeholder="github:you/app" required spellcheck="false"></label>
+<label>Domains <small>one per line, routed through Caddy with automatic HTTPS</small>
+  <textarea name="domains" rows="2" spellcheck="false" placeholder="app.example.com">{{join .Domains "\n"}}</textarea></label>
+<div class="row">
+  <label>Package <small>default: <code>default</code></small><input name="package" value="{{.Package}}" spellcheck="false"></label>
+  <label>Command <small>default: <code>mainProgram</code></small><input name="command" value="{{.Command}}" placeholder="bin/server" spellcheck="false"></label>
+</div>
+<div class="row">
+  <label>Health check path <small>default: TCP check</small><input name="health_path" value="{{healthPath .}}" placeholder="/healthz" spellcheck="false"></label>
+  <label>Health timeout <small>default: 30s</small><input name="health_timeout" value="{{healthTimeout .}}" placeholder="30s" spellcheck="false"></label>
+</div>
+<fieldset>
+  <legend>Databases <small>private to this app, peer-authenticated over a unix socket</small></legend>
+  <label class="check"><input type="checkbox" name="db_postgres" value="1" {{if hasDB . "postgres"}}checked{{end}}> PostgreSQL
+    <input class="tiny" name="pg_version" value="{{dbVersion .}}" placeholder="18" aria-label="PostgreSQL major version"> <small>sets <code>DATABASE_URL</code></small></label>
+  <label class="check"><input type="checkbox" name="db_redis" value="1" {{if hasDB . "redis"}}checked{{end}}> Redis <small>sets <code>REDIS_URL</code></small></label>
+</fieldset>
+<label>Environment <small>KEY=VALUE per line; stored in git, so use secrets for anything sensitive</small>
+  <textarea name="env" rows="4" spellcheck="false" placeholder="LOG_LEVEL=info">{{envLines .Env}}</textarea></label>
+{{end}}

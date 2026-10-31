@@ -56,3 +56,22 @@ func SetProfile(ctx context.Context, profile, storePath string) error {
 	}
 	return nil
 }
+
+// Rollback switches the profile to its previous generation.
+func Rollback(ctx context.Context, profile string) error {
+	return nixEnv(ctx, "--profile", profile, "--rollback")
+}
+
+// DeleteOldGenerations keeps the newest keep generations of profile.
+func DeleteOldGenerations(ctx context.Context, profile string, keep int) error {
+	return nixEnv(ctx, "--profile", profile, "--delete-generations", fmt.Sprintf("+%d", keep))
+}
+
+func nixEnv(ctx context.Context, args ...string) error {
+	cmd := exec.CommandContext(ctx, "nix-env", args...)
+	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("nix-env %s: %w", strings.Join(args, " "), err)
+	}
+	return nil
+}

@@ -1,0 +1,10 @@
+{{define "content"}}
+<div class="pagehead">
+  <div>
+    <h1>{{.Job.Title}} {{template "jobstate" .Job.State}}</h1>
+    <p class="sub">Started {{ago .Job.Started}}{{if .Job.App}} · <a href="/apps/{{.Job.App}}">{{.Job.App}}</a>{{end}}</p>
+  </div>
+  <div class="actions"><a class="button" href="{{if .Job.App}}/apps/{{.Job.App}}{{else}}/{{end}}">Back</a></div>
+</div>
+<pre class="log tall" {{if eq .Job.State "running"}}data-stream="{{.Job.URL}}/events" data-replace{{end}} data-autoscroll>{{.Log}}</pre>
+{{end}}

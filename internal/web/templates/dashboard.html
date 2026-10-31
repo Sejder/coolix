@@ -1,0 +1,41 @@
+{{define "content"}}
+<div class="pagehead">
+  <h1>Apps</h1>
+  <div class="actions">
+    <a class="button" href="/apps/new">New app</a>
+    <form method="post" action="/deploy"><button class="primary">Deploy all</button></form>
+  </div>
+</div>
+
+{{with .Status}}
+{{if not .RunningRev}}
+  <div class="banner">Nothing deployed yet. Add an app and deploy it.</div>
+{{else if .UpToDate}}
+  <div class="banner ok">Running <code>{{shortRev .RunningRev}}</code>. Everything is deployed.</div>
+{{else}}
+  <div class="banner warn">The apps repo (<code>{{shortRev .HeadRev}}</code>) has changes that aren't running yet (running <code>{{shortRev .RunningRev}}</code>). Deploy to apply them.</div>
+{{end}}
+
+<div class="card flush">
+<table class="apps">
+  <thead><tr><th>App</th><th>Status</th><th>Domains</th><th>Source</th><th></th></tr></thead>
+  <tbody>
+  {{range .Apps}}
+    <tr>
+      <td><a class="appname" href="/apps/{{.Name}}">{{.Name}}</a></td>
+      <td>{{template "slot" .}}</td>
+      <td>{{range .Domains}}<a class="domain" href="https://{{.}}" rel="noopener">{{.}}</a> {{else}}<span class="muted">—</span>{{end}}</td>
+      <td>{{with .Def}}<code class="src">{{.Source}}</code>{{else}}<span class="muted">removed</span>{{end}}</td>
+      <td class="right">{{if .Def}}<form method="post" action="/apps/{{.Name}}/deploy"><button class="small">Deploy</button></form>{{end}}</td>
+    </tr>
+  {{else}}
+    <tr><td colspan="5" class="empty">No apps yet. <a href="/apps/new">Add your first app</a>: any flake exposing <code>packages.&lt;system&gt;.default</code> that listens on <code>$PORT</code>.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+{{end}}
+
+<h2>Recent deploys</h2>
+<div class="card flush">{{template "jobs" .Jobs}}</div>
+{{end}}

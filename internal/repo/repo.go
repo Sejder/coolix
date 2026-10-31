@@ -111,3 +111,30 @@ func (r *Repo) RemoveApp(name string) error {
 	}
 	return os.RemoveAll(dir)
 }
+
+// Head returns the current commit of the apps repo.
+func (r *Repo) Head() (string, error) {
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = r.Dir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// SameTree reports whether rev has the same content as HEAD (a rollback
+// commit restores an old tree under a new commit).
+func (r *Repo) SameTree(rev string) bool {
+	tree := func(ref string) string {
+		cmd := exec.Command("git", "rev-parse", "--verify", "--quiet", ref+"^{tree}")
+		cmd.Dir = r.Dir
+		out, err := cmd.Output()
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(out))
+	}
+	a := tree(rev)
+	return a != "" && a == tree("HEAD")
+}

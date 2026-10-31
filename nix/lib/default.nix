@@ -22,12 +22,14 @@
         version = 1;
         rev = inputs.self.rev or inputs.self.dirtyRev or "unknown";
         apps = lib.mapAttrs (_: app: app.manifest) apps;
+        services = lib.concatMap (app: app.serviceNames) (lib.attrValues apps);
       });
 
       profile = pkgs.runCommandLocal "coolix-app-profile" { } ''
         mkdir -p $out/units
         ${lib.concatMapStrings (app: ''
           cp ${app.unit} $out/units/${app.unitName}
+          ${lib.concatStrings (lib.mapAttrsToList (n: u: "cp ${u} $out/units/${n}\n") app.services)}
         '') (lib.attrValues apps)}
         cp ${manifest} $out/apps.json
       '';

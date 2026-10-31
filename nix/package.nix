@@ -1,6 +1,6 @@
-{ lib, buildGoModule }:
+{ lib, buildGo127Module }:
 
-buildGoModule {
+buildGo127Module {
   pname = "coolix";
   version = "0.1.0";
 

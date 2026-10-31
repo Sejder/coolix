@@ -20,6 +20,15 @@ type Health struct {
 	Timeout string `toml:"timeout,omitempty"`
 }
 
+// Database is a per-app database instance; coolix injects its connection
+// settings (DATABASE_URL for postgres, REDIS_URL for redis).
+type Database struct {
+	Kind    string `toml:"kind"`
+	Version string `toml:"version,omitempty"`
+}
+
+var dbKinds = map[string]bool{"postgres": true, "redis": true}
+
 type App struct {
 	Name    string   `toml:"name"`
 	Source  string   `toml:"source"`
@@ -32,6 +41,7 @@ type App struct {
 	Health        *Health           `toml:"health,omitempty"`
 	Env           map[string]string `toml:"env,omitempty"`
 	Secrets       []string          `toml:"secrets,omitempty"`
+	Databases     []Database        `toml:"databases,omitempty"`
 	Hardening     map[string]any    `toml:"hardening,omitempty"`
 }
 
@@ -49,7 +59,12 @@ var (
 )
 
 // reservedEnv are set by coolix itself.
-var reservedEnv = map[string]bool{"PORT": true}
+var reservedEnv = map[string]bool{
+	"PORT": true, "DATABASE_URL": true, "REDIS_URL": true,
+	"PGHOST": true, "PGUSER": true, "PGDATABASE": true,
+}
+
+var versionRe = regexp.MustCompile(`^[0-9]{1,3}$`)
 
 // Validate checks everything that ends up interpolated into flake.nix or unit
 // files, so a bad app.toml fails here instead of producing broken Nix.
@@ -86,9 +101,26 @@ func (a *App) Validate() error {
 		}
 	}
 	for _, k := range a.Secrets {
-		if !envKeyRe.MatchString(k) {
+		switch {
+		case !envKeyRe.MatchString(k):
 			errs = append(errs, fmt.Errorf("secret %q: invalid variable name", k))
+		case reservedEnv[k] || strings.HasPrefix(k, "COOLIX_"):
+			errs = append(errs, fmt.Errorf("secret %q: reserved by coolix", k))
+		case a.Env[k] != "":
+			errs = append(errs, fmt.Errorf("secret %q: also set as a plain env var", k))
 		}
+	}
+	seen := map[string]bool{}
+	for _, db := range a.Databases {
+		switch {
+		case !dbKinds[db.Kind]:
+			errs = append(errs, fmt.Errorf("database kind %q: want postgres or redis", db.Kind))
+		case seen[db.Kind]:
+			errs = append(errs, fmt.Errorf("database kind %q: listed twice", db.Kind))
+		case db.Version != "" && (db.Kind != "postgres" || !versionRe.MatchString(db.Version)):
+			errs = append(errs, fmt.Errorf("database %s: version %q: only postgres takes a major version, e.g. \"18\"", db.Kind, db.Version))
+		}
+		seen[db.Kind] = true
 	}
 	return errors.Join(errs...)
 }
