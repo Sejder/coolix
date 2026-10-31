@@ -7,6 +7,7 @@ import (
 	"coolix/internal/activate"
 	"coolix/internal/appdef"
 	"coolix/internal/profile"
+	"coolix/internal/units"
 )
 
 type AppStatus struct {
@@ -39,9 +40,9 @@ func slotOf(app string) string {
 
 func (e *Engine) Status() (*Status, error) {
 	st := &Status{}
-	m, _ := activate.ReadManifest(e.Profile)
+	m, _ := units.ReadManifest(e.Profile)
 	if m == nil {
-		m = &activate.Manifest{}
+		m = &units.Manifest{}
 	}
 	st.RunningRev = m.Rev
 
@@ -62,7 +63,7 @@ func (e *Engine) Status() (*Status, error) {
 		s.Deployed = true
 		s.Domains = app.Domains
 		if s.Slot = slotOf(name); s.Slot != "" {
-			s.Port = app.Ports[s.Slot]
+			s.Port = app.Port(s.Slot)
 		}
 	}
 	for _, s := range byName {

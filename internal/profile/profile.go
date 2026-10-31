@@ -3,6 +3,7 @@
 package profile
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -12,8 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"coolix/internal/activate"
 )
 
 type Generation struct {
@@ -54,13 +53,7 @@ func List(path string) ([]Generation, error) {
 		}
 		n, _ := strconv.Atoi(m[1])
 		g := Generation{Number: n, Path: target, Time: info.ModTime(), Current: e.Name() == current}
-		if man, err := activate.ReadManifest(target); err == nil {
-			g.Rev = man.Rev
-			for name := range man.Apps {
-				g.Apps = append(g.Apps, name)
-			}
-			sort.Strings(g.Apps)
-		}
+		g.Rev, g.Apps = summary(target)
 		gens = append(gens, g)
 	}
 	sort.Slice(gens, func(i, j int) bool { return gens[i].Number < gens[j].Number })
@@ -102,4 +95,24 @@ func StorePath(name string) (string, error) {
 		return "", fmt.Errorf("%s: not a valid app profile: %w", p, err)
 	}
 	return p, nil
+}
+
+// summary reads the revision and app names of any manifest version.
+func summary(profile string) (rev string, apps []string) {
+	data, err := os.ReadFile(filepath.Join(profile, "apps.json"))
+	if err != nil {
+		return "", nil
+	}
+	var m struct {
+		Rev  string                     `json:"rev"`
+		Apps map[string]json.RawMessage `json:"apps"`
+	}
+	if json.Unmarshal(data, &m) != nil {
+		return "", nil
+	}
+	for name := range m.Apps {
+		apps = append(apps, name)
+	}
+	sort.Strings(apps)
+	return m.Rev, apps
 }

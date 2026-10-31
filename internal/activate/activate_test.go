@@ -7,9 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
+
+	"coolix/internal/units"
 )
 
 type fakeSystemd struct {
@@ -45,24 +49,30 @@ func (r *fakeRouter) SetRoute(app string, _ []string, port int) error {
 }
 func (r *fakeRouter) RemoveRoute(app string) error { delete(r.routes, app); return nil }
 
-// mkProfile writes a fake profile: app -> unit file contents; db units are plain services.
-func mkProfile(t *testing.T, apps map[string]string, dbs ...string) string {
+const testPG = "/nix/store/1jzvzdyhmwjm2xdw2iak5p5x8qj2pkgr-postgresql-18.1"
+
+// mkProfile writes a fake profile: app -> version (changes the rendered unit);
+// apps listed in withDB get a postgres database.
+func mkProfile(t *testing.T, apps map[string]string, withDB ...string) string {
 	t.Helper()
 	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, "units"), 0o755); err != nil {
-		t.Fatal(err)
+	m := units.Manifest{Version: units.ManifestVersion, Apps: map[string]units.App{}}
+	names := make([]string, 0, len(apps))
+	for name := range apps {
+		names = append(names, name)
 	}
-	m := Manifest{Version: 1, Apps: map[string]AppManifest{}, Services: dbs}
-	i := 0
-	for name, content := range apps {
-		unit := "coolix-app-" + name + "@.service"
-		m.Apps[name] = AppManifest{Unit: unit, Domains: []string{name + ".test"},
-			Ports: map[string]int{"blue": 20000 + 2*i, "green": 20001 + 2*i}}
-		i++
-		os.WriteFile(filepath.Join(dir, "units", unit), []byte(content), 0o644)
-	}
-	for _, db := range dbs {
-		os.WriteFile(filepath.Join(dir, "units", db), []byte("db"), 0o644)
+	sort.Strings(names)
+	for i, name := range names {
+		app := units.App{
+			Exe:      "/nix/store/0c6sg6wp6c6k3mhwkzv8jk4xkkr5mpyh-" + name + "/bin/" + name,
+			PortBase: 20000 + 2*i,
+			Domains:  []string{name + ".test"},
+			Env:      map[string]string{"VERSION": apps[name]},
+		}
+		if slices.Contains(withDB, name) {
+			app.Databases = []units.Database{{Kind: "postgres", Package: testPG}}
+		}
+		m.Apps[name] = app
 	}
 	data, _ := json.Marshal(m)
 	os.WriteFile(filepath.Join(dir, "apps.json"), data, 0o644)
@@ -72,9 +82,11 @@ func mkProfile(t *testing.T, apps map[string]string, dbs ...string) string {
 func newActivator(t *testing.T) (*Activator, *fakeSystemd, *fakeRouter) {
 	sd, r := newFake(), &fakeRouter{routes: map[string]int{}}
 	clock := time.Unix(0, 0)
-	return &Activator{UnitDir: t.TempDir(), Systemd: sd, Router: r,
-		Sleep: func(d time.Duration) { clock = clock.Add(d) },
-		Now:   func() time.Time { return clock }}, sd, r
+	return &Activator{UnitDir: t.TempDir(), RenderDir: t.TempDir(), Systemd: sd, Router: r,
+		Policy:  units.Policy{PortMin: 20000, PortMax: 29999},
+		Options: units.Options{Exec: "/etc/coolix/coolix", SecretsDir: "/var/lib/coolix-secrets"},
+		Sleep:   func(d time.Duration) { clock = clock.Add(d) },
+		Now:     func() time.Time { return clock }}, sd, r
 }
 
 func TestBlueGreenLifecycle(t *testing.T) {
@@ -155,7 +167,7 @@ func TestUnchangedAppStartsAfterBoot(t *testing.T) {
 func TestForceRestartAndServices(t *testing.T) {
 	ctx := context.Background()
 	a, sd, r := newActivator(t)
-	p := mkProfile(t, map[string]string{"blog": "v1"}, "coolix-db-blog-postgres.service")
+	p := mkProfile(t, map[string]string{"blog": "v1"}, "blog")
 	if _, err := a.Activate(ctx, p); err != nil {
 		t.Fatal(err)
 	}
@@ -200,4 +212,34 @@ func indexOf(s []string, v string) int {
 		}
 	}
 	return -1
+}
+
+func TestRefusesInvalidProfile(t *testing.T) {
+	a, sd, _ := newActivator(t)
+	p := mkProfile(t, map[string]string{"blog": "v1"})
+	data, _ := os.ReadFile(filepath.Join(p, "apps.json"))
+	evil := strings.Replace(string(data), `"env":{`, `"hardening":{"DynamicUser":false},"env":{`, 1)
+	os.WriteFile(filepath.Join(p, "apps.json"), []byte(evil), 0o644)
+	if _, err := a.Activate(context.Background(), p); err == nil || !strings.Contains(err.Error(), "DynamicUser") {
+		t.Fatalf("expected refusal, got %v", err)
+	}
+	if len(sd.calls) != 0 {
+		t.Fatalf("systemd touched: %v", sd.calls)
+	}
+	if entries, _ := os.ReadDir(a.UnitDir); len(entries) != 0 {
+		t.Fatal("units linked for a refused profile")
+	}
+}
+
+func TestPrunesOldRenders(t *testing.T) {
+	ctx := context.Background()
+	a, _, _ := newActivator(t)
+	for _, v := range []string{"v1", "v2", "v3"} {
+		if _, err := a.Activate(ctx, mkProfile(t, map[string]string{"blog": v})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if entries, _ := os.ReadDir(a.RenderDir); len(entries) != 1 {
+		t.Fatalf("want 1 rendered dir, got %d", len(entries))
+	}
 }

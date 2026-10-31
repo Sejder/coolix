@@ -20,11 +20,14 @@ func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
 // appFlags are shared by `app add` and `app set`; only flags that were given
 // change the app.
 type appFlags struct {
-	fs                        *flag.FlagSet
-	source, pkg, command      *string
-	healthPath, healthTimeout *string
-	domains, envs, unsetEnvs  multiFlag
-	dbs                       multiFlag
+	fs                              *flag.FlagSet
+	source, pkg, command, preStart  *string
+	healthPath, healthTimeout       *string
+	memoryMax, cpuQuota             *string
+	tasksMax, backupKeep            *int
+	backupSchedule, webhookBranch   *string
+	domains, envs, unsetEnvs, paths multiFlag
+	dbs                             multiFlag
 }
 
 func newAppFlags(name string) *appFlags {
@@ -32,6 +35,14 @@ func newAppFlags(name string) *appFlags {
 	f.source = f.fs.String("source", "", "flake reference of the app")
 	f.pkg = f.fs.String("package", "", "package attribute (default: default)")
 	f.command = f.fs.String("command", "", "executable path inside the package (default: mainProgram)")
+	f.preStart = f.fs.String("pre-start", "", "executable inside the package to run before each start, e.g. bin/migrate")
+	f.memoryMax = f.fs.String("memory-max", "", "memory limit, e.g. 512M (empty: none)")
+	f.cpuQuota = f.fs.String("cpu-quota", "", "CPU limit, e.g. 50% (empty: none)")
+	f.tasksMax = f.fs.Int("tasks-max", 0, "process/thread limit (0: default)")
+	f.backupSchedule = f.fs.String("backup-schedule", "", "systemd calendar expression for postgres backups, e.g. daily (empty: on demand only)")
+	f.backupKeep = f.fs.Int("backup-keep", 0, "postgres backups to keep (default 7)")
+	f.webhookBranch = f.fs.String("webhook-branch", "", "only deploy webhook pushes to this branch")
+	f.fs.Var(&f.paths, "path", "nixpkgs attribute to put on the app's PATH (repeatable; replaces existing; \"none\" clears)")
 	f.healthPath = f.fs.String("health-path", "", "HTTP path that returns < 400 when the app is ready (default: TCP check)")
 	f.healthTimeout = f.fs.String("health-timeout", "", "how long a new slot may take to become healthy (default 30s)")
 	f.fs.Var(&f.domains, "domain", "domain to route to the app (repeatable; replaces existing domains)")
@@ -52,6 +63,54 @@ func (f *appFlags) apply(app *appdef.App) error {
 	}
 	if set["command"] {
 		app.Command = *f.command
+	}
+	if set["pre-start"] {
+		app.PreStart = *f.preStart
+	}
+	if set["path"] {
+		app.Path = nil
+		for _, p := range f.paths {
+			if p != "none" {
+				app.Path = append(app.Path, p)
+			}
+		}
+	}
+	if set["memory-max"] || set["cpu-quota"] || set["tasks-max"] {
+		if app.Resources == nil {
+			app.Resources = &appdef.Resources{}
+		}
+		if set["memory-max"] {
+			app.Resources.MemoryMax = *f.memoryMax
+		}
+		if set["cpu-quota"] {
+			app.Resources.CPUQuota = *f.cpuQuota
+		}
+		if set["tasks-max"] {
+			app.Resources.TasksMax = *f.tasksMax
+		}
+		if *app.Resources == (appdef.Resources{}) {
+			app.Resources = nil
+		}
+	}
+	if set["backup-schedule"] || set["backup-keep"] {
+		if app.Backup == nil {
+			app.Backup = &appdef.Backup{}
+		}
+		if set["backup-schedule"] {
+			app.Backup.Schedule = *f.backupSchedule
+		}
+		if set["backup-keep"] {
+			app.Backup.Keep = *f.backupKeep
+		}
+		if *app.Backup == (appdef.Backup{}) {
+			app.Backup = nil
+		}
+	}
+	if set["webhook-branch"] {
+		app.Webhook = nil
+		if *f.webhookBranch != "" {
+			app.Webhook = &appdef.Webhook{Branch: *f.webhookBranch}
+		}
 	}
 	if set["domain"] {
 		app.Domains = f.domains

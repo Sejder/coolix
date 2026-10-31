@@ -26,8 +26,10 @@ const usage = `usage: coolix <command> [args]
 commands:
   app add NAME --source REF    add an app (see app set for flags)
   app set NAME [flags]         change an app: --source, --domain (repeatable), --env K=V, --unset-env K,
-                               --health-path, --health-timeout, --package, --command,
-                               --db postgres[:VERSION] / --db redis / --db none
+                               --health-path, --health-timeout, --package, --command, --pre-start,
+                               --path ATTR (repeatable), --memory-max, --cpu-quota, --tasks-max,
+                               --db postgres[:VERSION] / --db redis / --db none,
+                               --backup-schedule, --backup-keep, --webhook-branch
   app rm NAME                  remove an app (applied on next deploy)
   app list                     list apps
   secret set APP KEY           set a secret (value read from stdin; applied on next deploy)
@@ -35,13 +37,23 @@ commands:
   secret list APP              list secret names (values are write-only)
   deploy [NAME]                lock, build and activate; with NAME, update that app to its latest revision
   status                       show running apps, their slots and whether the repo has undeployed changes
+  logs APP [-f] [-n LINES]     show (or follow) an app's logs, including its databases
   generations                  list app profile generations
   rollback [GEN]               switch back to generation GEN (default: the previous one)
+  db backup APP                dump the app's postgres database now
+  db backups APP               list the app's database backups
+  db restore APP BACKUP        replace the app's database with a backup
+  webhook enable APP           create (or rotate) the app's deploy webhook token and print it
+  webhook show APP             print the webhook URL path and token
+  webhook disable APP          turn the app's webhook off
   serve                        run the web UI
 
-internal (run as root by systemd):
-  activate                     re-activate the current profile (at boot)
-  activate-store NAME          make /nix/store/NAME the current profile and activate it
+internal (run by systemd):
+  activate                     re-activate the current profile (root, at boot)
+  activate-store NAME          make /nix/store/NAME the current profile and activate it (root)
+  exec-app, db-init, db-createdb, db-backup, db-restore
+                               helpers inside app and database units (app user)
+  query-serve                  answer one coolix-query connection
 `
 
 func logf(format string, args ...any) { fmt.Fprintf(os.Stderr, "coolix: "+format+"\n", args...) }
@@ -59,6 +71,9 @@ func run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		fmt.Fprint(os.Stderr, usage)
 		return errors.New("missing command")
+	}
+	if f, ok := sandboxCommands[args[0]]; ok {
+		return f(ctx, args[1:])
 	}
 	c, err := engine.ConfigFromEnv()
 	if err != nil {
@@ -90,6 +105,12 @@ func run(ctx context.Context, args []string) error {
 		return runStatus(e)
 	case "generations":
 		return runGenerations(e)
+	case "logs":
+		return runLogs(ctx, e, args[1:])
+	case "db":
+		return runDB(ctx, e, args[1:])
+	case "webhook":
+		return runWebhook(e, args[1:])
 	case "rollback":
 		if len(args) > 2 {
 			return errors.New("usage: coolix rollback [GEN]")

@@ -31,7 +31,7 @@ func (e *Engine) App(name string) (*appdef.App, error) {
 
 // CreateApp allocates ports for a new app, saves and commits it.
 func (e *Engine) CreateApp(app *appdef.App) error {
-	l, err := e.lock()
+	l, err := e.repoLock()
 	if err != nil {
 		return err
 	}
@@ -58,7 +58,7 @@ func (e *Engine) CreateApp(app *appdef.App) error {
 
 // UpdateApp saves and commits changes to an existing app.
 func (e *Engine) UpdateApp(app *appdef.App) error {
-	l, err := e.lock()
+	l, err := e.repoLock()
 	if err != nil {
 		return err
 	}
@@ -85,7 +85,7 @@ func (e *Engine) save(app *appdef.App, msg string) error {
 
 // RemoveApp deletes an app from the repo; the next deploy stops it.
 func (e *Engine) RemoveApp(name string) error {
-	l, err := e.lock()
+	l, err := e.repoLock()
 	if err != nil {
 		return err
 	}
@@ -100,7 +100,10 @@ func (e *Engine) RemoveApp(name string) error {
 	if _, err := r.Sync(); err != nil {
 		return err
 	}
-	return r.Commit("Remove app " + name)
+	if err := r.Commit("Remove app " + name); err != nil {
+		return err
+	}
+	return e.DisableWebhook(name)
 }
 
 type SecretInfo struct {
@@ -130,7 +133,7 @@ func (e *Engine) Secrets(app string) ([]SecretInfo, error) {
 // SetSecret records a secret value (applied at the next deploy) and commits
 // only its name to the repo.
 func (e *Engine) SetSecret(app, key, value string) error {
-	l, err := e.lock()
+	l, err := e.repoLock()
 	if err != nil {
 		return err
 	}
@@ -152,7 +155,7 @@ func (e *Engine) SetSecret(app, key, value string) error {
 }
 
 func (e *Engine) UnsetSecret(app, key string) error {
-	l, err := e.lock()
+	l, err := e.repoLock()
 	if err != nil {
 		return err
 	}

@@ -49,7 +49,8 @@ d.get(base + "/")
 shot("dashboard", height=760)
 
 d.get(base + "/apps/hello")
-time.sleep(2)  # let the journal stream in
+# App logs stream in through coolix-query.
+wait.until(lambda d: "GET /healthz" in d.find_element(By.CSS_SELECTOR, "pre.log").text)
 shot("app", height=1500)
 
 d.get(base + "/generations")

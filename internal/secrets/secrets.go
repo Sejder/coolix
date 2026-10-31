@@ -14,12 +14,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 // CredName is the credential ID; it must match LoadCredentialEncrypted=env:...
@@ -196,8 +198,13 @@ func (s *Store) write(ctx context.Context, app string, vars map[string]string) e
 // secrets changed and therefore need a restart.
 func (s *Store) Apply(ctx context.Context, pendingDir string, apps []string, needCred map[string]bool) (map[string]bool, error) {
 	changed := map[string]bool{}
+	dir, err := openPendingDir(pendingDir)
+	if err != nil {
+		return changed, err
+	}
+	defer dir.close()
 	for _, app := range apps {
-		p, err := ReadPending(pendingDir, app)
+		p, err := dir.read(app)
 		if err != nil {
 			return changed, err
 		}
@@ -218,7 +225,7 @@ func (s *Store) Apply(ctx context.Context, pendingDir string, apps []string, nee
 		if err := s.write(ctx, app, vars); err != nil {
 			return changed, err
 		}
-		if err := os.Remove(pendingPath(pendingDir, app)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := dir.remove(app); err != nil {
 			return changed, err
 		}
 		changed[app] = true
@@ -243,4 +250,67 @@ func remove(s []string, v string) []string {
 		}
 	}
 	return out
+}
+
+// pendingDir is the coolix-writable pending directory as seen by root: it
+// is opened without following symlinks, and files in it are read with
+// O_NOFOLLOW, so the unprivileged side can't point root at other files.
+type pendingDir struct{ fd int }
+
+func openPendingDir(dir string) (*pendingDir, error) {
+	fd, err := syscall.Open(dir, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if errors.Is(err, syscall.ENOENT) {
+		return nil, nil
+	} else if err != nil {
+		return nil, fmt.Errorf("opening %s: %w", dir, err)
+	}
+	return &pendingDir{fd}, nil
+}
+
+func (d *pendingDir) close() {
+	if d != nil {
+		syscall.Close(d.fd)
+	}
+}
+
+func (d *pendingDir) read(app string) (*Pending, error) {
+	if d == nil {
+		return &Pending{}, nil
+	}
+	fd, err := syscall.Openat(d.fd, app+".json", syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if errors.Is(err, syscall.ENOENT) {
+		return &Pending{}, nil
+	} else if err != nil {
+		return nil, fmt.Errorf("pending secrets of %s: %w", app, err)
+	}
+	f := os.NewFile(uintptr(fd), app+".json")
+	defer f.Close()
+	if st, err := f.Stat(); err != nil || !st.Mode().IsRegular() || st.Size() > 1<<20 {
+		return nil, fmt.Errorf("pending secrets of %s: not a regular file", app)
+	}
+	var p Pending
+	if err := json.NewDecoder(io.LimitReader(f, 1<<20)).Decode(&p); err != nil {
+		return nil, fmt.Errorf("pending secrets of %s: %w", app, err)
+	}
+	for k := range p.Set {
+		if !keyRe.MatchString(k) {
+			return nil, fmt.Errorf("pending secrets of %s: invalid name %q", app, k)
+		}
+	}
+	for _, k := range p.Unset {
+		if !keyRe.MatchString(k) {
+			return nil, fmt.Errorf("pending secrets of %s: invalid name %q", app, k)
+		}
+	}
+	return &p, nil
+}
+
+func (d *pendingDir) remove(app string) error {
+	if d == nil {
+		return nil
+	}
+	if err := syscall.Unlinkat(d.fd, app+".json"); err != nil && !errors.Is(err, syscall.ENOENT) {
+		return err
+	}
+	return nil
 }

@@ -32,8 +32,16 @@ deployed is recorded in a git repo.
 - **Real secrets.** Secret values are encrypted with `systemd-creds` (TPM2
   and/or host key) and handed to the app through `LoadCredentialEncrypted=`.
   They never enter git, the Nix store or a world-readable file.
-- **Hardened by default.** Apps run with `DynamicUser`, `ProtectSystem=strict`,
-  a syscall filter and an empty capability set, with per-key opt-outs.
+- **Hardened by default, and it stays that way.** Apps run with `DynamicUser`,
+  `ProtectSystem=strict`, a syscall filter and an empty capability set. Root
+  renders every unit from validated data, so neither an app definition nor a
+  compromised web UI can opt out of the sandbox.
+- **Deploy on push.** Each app can get a signed webhook URL for GitHub,
+  Gitea, Forgejo, GitLab or any CI job.
+- **Database backups.** Scheduled or on-demand `pg_dump`s with retention, and
+  restores from the UI or CLI.
+- **Resource limits, migrations, runtime packages.** Memory, CPU and task
+  limits per app, a `pre_start` command, and nixpkgs tools on `PATH`.
 - **NixOS-native.** One module, no containers, and your host's
   `nixos-rebuild` is never involved in deploying an app.
 
@@ -90,7 +98,9 @@ sudo coolix deploy blog
 coolix app add NAME --source REF [flags]   add an app
 coolix app set NAME [flags]                change it: --source, --domain, --env K=V, --unset-env K,
                                            --health-path, --health-timeout, --package, --command,
-                                           --db postgres[:VERSION] / --db redis / --db none
+                                           --pre-start, --path ATTR, --memory-max, --cpu-quota,
+                                           --tasks-max, --db postgres[:VERSION] / --db redis / --db none,
+                                           --backup-schedule, --backup-keep, --webhook-branch
 coolix app rm NAME                         remove it (applied on next deploy)
 coolix app list
 coolix secret set APP KEY < value          set a secret (applied on next deploy)
@@ -98,8 +108,13 @@ coolix secret unset APP KEY
 coolix secret list APP
 coolix deploy [NAME]                       build and activate; with NAME, also update that app's source
 coolix status                              running slots, and whether the repo has undeployed changes
+coolix logs APP [-f] [-n LINES]            the app's logs, including its databases and backups
 coolix generations
 coolix rollback [GEN]
+coolix db backup APP                       dump the app's postgres database now
+coolix db backups APP                      list its dumps
+coolix db restore APP BACKUP               replace the database's contents with a dump
+coolix webhook enable|show|disable APP     manage the app's deploy webhook
 ```
 
 Run it with `sudo`. It drops to the unprivileged `coolix` user straight away.
@@ -118,8 +133,9 @@ secrets, and `DATABASE_URL`/`PGHOST`/`PGUSER`/`PGDATABASE` and `REDIS_URL` when
 it has those databases. The [templates](templates/) are minimal starting points
 for Go, Node, Python and Rust.
 
-Since the app runs under systemd's `DynamicUser`, its `PATH` is minimal, so
-reference the tools you need through Nix (`${pkgs.foo}/bin/foo`).
+Since the app runs under systemd's `DynamicUser`, its `PATH` is minimal.
+Reference the tools you need through Nix (`${pkgs.foo}/bin/foo`), or list
+them in `path` in `app.toml`.
 
 ## Documentation
 
@@ -139,5 +155,5 @@ CI runs the same commands on GitHub Actions, with KVM for the VM tests.
 
 ## Not yet
 
-Deploy webhooks and `git push` deploys, PR preview environments, backups,
-multiple users, and multi-host deployments.
+`git push` deploys, PR preview environments, off-host backups, multiple
+users, and multi-host deployments.

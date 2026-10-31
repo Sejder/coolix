@@ -19,4 +19,26 @@
 </fieldset>
 <label>Environment <small>KEY=VALUE per line; stored in git, so use secrets for anything sensitive</small>
   <textarea name="env" rows="4" spellcheck="false" placeholder="LOG_LEVEL=info">{{envLines .Env}}</textarea></label>
+{{template "advancedfields" .}}
+{{end}}
+{{define "advancedfields"}}
+<details class="advanced" {{if or .PreStart .Path .Resources .Backup .Webhook}}open{{end}}>
+  <summary>Advanced</summary>
+  <div class="row">
+    <label>Pre-start command <small>runs before each start, e.g. migrations</small>
+      <input name="pre_start" value="{{.PreStart}}" placeholder="bin/migrate" spellcheck="false"></label>
+    <label>Runtime packages <small>nixpkgs attributes on <code>PATH</code></small>
+      <input name="path" value="{{join .Path " "}}" placeholder="ffmpeg imagemagick" spellcheck="false"></label>
+  </div>
+  <div class="row three">
+    <label>Memory limit<input name="memory_max" value="{{with .Resources}}{{.MemoryMax}}{{end}}" placeholder="512M" spellcheck="false"></label>
+    <label>CPU limit<input name="cpu_quota" value="{{with .Resources}}{{.CPUQuota}}{{end}}" placeholder="100%" spellcheck="false"></label>
+    <label>Task limit<input name="tasks_max" value="{{with .Resources}}{{if .TasksMax}}{{.TasksMax}}{{end}}{{end}}" placeholder="512" inputmode="numeric"></label>
+  </div>
+  <div class="row three">
+    <label>Backup schedule <small>postgres only</small><input name="backup_schedule" value="{{with .Backup}}{{.Schedule}}{{end}}" placeholder="daily" spellcheck="false"></label>
+    <label>Backups to keep<input name="backup_keep" value="{{with .Backup}}{{if .Keep}}{{.Keep}}{{end}}{{end}}" placeholder="7" inputmode="numeric"></label>
+    <label>Webhook branch <small>default: any</small><input name="webhook_branch" value="{{with .Webhook}}{{.Branch}}{{end}}" placeholder="main" spellcheck="false"></label>
+  </div>
+</details>
 {{end}}

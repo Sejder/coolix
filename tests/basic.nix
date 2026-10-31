@@ -7,6 +7,21 @@
 
 let
   testApp = version: import ./app/package.nix { inherit pkgs version; };
+
+  # A profile asking for a unit outside the sandbox (root), as the coolix
+  # user could build one by hand.
+  evilManifest = pkgs.writeText "evil-apps.json" (builtins.toJSON {
+    version = 2;
+    rev = "evil";
+    apps.evil = {
+      exe = "${pkgs.bash}/bin/bash";
+      port_base = 20010;
+      hardening.DynamicUser = false;
+      health = { };
+      resources = { };
+      backup = { };
+    };
+  });
 in
 {
   name = "coolix-basic";
@@ -30,12 +45,17 @@ in
       flake-registry = "";
     };
     environment.etc."coolix-test-app".source = ./app;
-    environment.systemPackages = [ pkgs.curl pkgs.git ];
+    environment.etc."coolix-evil.nix".text = ''
+      with import ${pkgs.path} { }; runCommandLocal "coolix-app-profile" { json = builtins.readFile ${evilManifest}; passAsFile = [ "json" ]; } "mkdir $out; cp $jsonPath $out/apps.json"
+    '';
+    environment.etc."coolix-override.nix".text = ''{ ... }: { Service.User = "root"; }'';
+    environment.systemPackages = [ pkgs.curl pkgs.git pkgs.socat ];
 
     system.extraDependencies = [
       (testApp "v1")
       (testApp "v2")
       (testApp "broken")
+      evilManifest
       pkgs.stdenvNoCC
       pkgs.bash
       pkgs.coreutils
@@ -65,6 +85,8 @@ in
 
     with subtest("hardening is on"):
         machine.succeed("systemctl show coolix-app-hello@blue -p DynamicUser | grep -x DynamicUser=yes")
+        machine.succeed("readlink /run/systemd/system/coolix-app-hello@.service | grep ^/run/coolix/units/")
+        machine.succeed("test $(stat -c %U /run/coolix/units) = root")
 
     with subtest("root drops to the coolix user; only activation runs as root"):
         machine.succeed("test $(stat -c %U /var/lib/coolix/repo/.git) = coolix")
@@ -73,6 +95,31 @@ in
     with subtest("coolix user may start only valid activation units"):
         machine.fail("runuser -u coolix -- systemctl start --no-ask-password systemd-tmpfiles-clean.service")
         machine.fail("runuser -u coolix -- systemctl start --no-ask-password coolix-activate@foo.service")
+        machine.fail("runuser -u coolix -- systemctl start --no-ask-password coolix-app-hello@green.service")
+
+    with subtest("the coolix user can't get root through a crafted profile"):
+        # Built by the coolix user like any profile, but asking for a root unit.
+        evil = machine.succeed("runuser -u coolix -- nix-build --no-out-link /etc/coolix-evil.nix").strip()
+        machine.fail(f"runuser -u coolix -- systemctl start --no-ask-password coolix-activate@{evil.removeprefix('/nix/store/')}.service")
+        machine.succeed("journalctl -u 'coolix-activate@*' | grep 'refusing to activate.*DynamicUser'")
+        machine.fail("test -e /run/systemd/system/coolix-app-evil@.service")
+        machine.fail("systemctl is-active coolix-app-evil@blue.service")
+        out = machine.succeed("coolix generations")
+        assert len(out.strip().splitlines()) == 2, out  # header + generation 1
+        served("v1")
+
+    with subtest("override.nix is refused"):
+        machine.succeed("runuser -u coolix -- cp /etc/coolix-override.nix /var/lib/coolix/repo/apps/hello/override.nix")
+        out = machine.fail("coolix deploy hello 2>&1")
+        assert "override.nix is no longer supported" in out, out
+        machine.succeed("rm /var/lib/coolix/repo/apps/hello/override.nix")
+
+    with subtest("the coolix user reads app logs through coolix-query, not the journal"):
+        machine.fail("id -nG coolix | grep -w systemd-journal")
+        machine.succeed("runuser -u coolix -- coolix logs hello | grep 'GET /healthz'")
+        machine.fail("runuser -u coolix -- journalctl -u coolix-app-hello@blue | grep 'GET /healthz'")
+        machine.succeed("echo 'unit sshd.service' | runuser -u coolix -- socat - UNIX-CONNECT:/run/coolix/query.sock | grep 'bad request'")
+        machine.fail("echo 'logs hello 10 0' | runuser -u nobody -- socat - UNIX-CONNECT:/run/coolix/query.sock")
 
     with subtest("blue/green redeploy has zero downtime"):
         machine.succeed(

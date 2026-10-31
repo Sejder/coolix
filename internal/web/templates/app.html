@@ -38,6 +38,46 @@
       </form>
     </section>
 
+    <section class="card">
+      <h2>Deploy webhook</h2>
+      {{if .NewWebhookToken}}
+      <p class="small">Add this webhook to your forge. The secret is shown <strong>only now</strong>.</p>
+      <dl class="kv small">
+        <dt>URL</dt><dd><code class="copy">{{.WebhookURL}}</code></dd>
+        <dt>Secret</dt><dd><code class="copy">{{.NewWebhookToken}}</code></dd>
+      </dl>
+      <p class="muted small">GitHub, Gitea, Forgejo: content type <code>application/json</code>, this secret, push events. GitLab: secret token. Anything else: <code>Authorization: Bearer &lt;secret&gt;</code>.</p>
+      {{else if .Webhook}}
+      <p class="small"><span class="pill job-succeeded">on</span> Pushes{{with .App.WebhookBranch}} to <code>{{.}}</code>{{end}} to <code>{{.WebhookURL}}</code> deploy this app.</p>
+      {{else}}
+      <p class="muted small">Deploy automatically when you push: your forge calls a signed URL on this server.</p>
+      {{end}}
+      <div class="inline">
+        <form method="post" action="/apps/{{.App.Name}}/webhook"{{if .Webhook}} data-confirm="Rotate the webhook secret? The old one stops working."{{end}}>
+          <button>{{if .Webhook}}Rotate secret{{else}}Enable{{end}}</button></form>
+        {{if .Webhook}}<form method="post" action="/apps/{{.App.Name}}/webhook"><input type="hidden" name="action" value="disable"><button class="link danger">disable</button></form>{{end}}
+      </div>
+    </section>
+
+    {{if hasDB .App "postgres"}}
+    <section class="card">
+      <h2>Database backups</h2>
+      <p class="muted small">Dumps of the app's PostgreSQL database{{with .App.Backup}}{{with .Schedule}}, taken <code>{{.}}</code>{{end}}{{end}}. Restoring replaces the database's contents.</p>
+      {{if .BackupsErr}}<p class="muted small">Backups unavailable: {{.BackupsErr}}</p>{{end}}
+      <ul class="backups">
+        {{range .Backups}}
+        <li><code>{{.Name}}</code> <span class="muted small">{{bytes .Size}} · {{ago .Time}}</span>
+          <form method="post" action="/apps/{{$.App.Name}}/backups/{{.Name}}/restore" class="inline">
+            <input name="confirm" placeholder="type {{$.App.Name}}" required spellcheck="false" aria-label="Confirm app name to restore">
+            <button class="link danger">restore</button></form></li>
+        {{else}}
+        {{if not .BackupsErr}}<li class="muted">No backups yet.</li>{{end}}
+        {{end}}
+      </ul>
+      <form method="post" action="/apps/{{.App.Name}}/backups"><button>Back up now</button></form>
+    </section>
+    {{end}}
+
     <section class="card flush">
       <h2 class="pad">Deploys</h2>
       {{template "jobs" .Jobs}}

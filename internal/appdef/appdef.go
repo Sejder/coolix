@@ -13,6 +13,8 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+
+	"coolix/internal/units"
 )
 
 type Health struct {
@@ -29,20 +31,65 @@ type Database struct {
 
 var dbKinds = map[string]bool{"postgres": true, "redis": true}
 
+// Resources are systemd resource limits for the app's slots.
+type Resources struct {
+	MemoryMax string `toml:"memory_max,omitempty"`
+	CPUQuota  string `toml:"cpu_quota,omitempty"`
+	TasksMax  int    `toml:"tasks_max,omitempty"`
+}
+
+// Backup schedules postgres dumps (on-demand backups work without it).
+type Backup struct {
+	Schedule string `toml:"schedule,omitempty"`
+	Keep     int    `toml:"keep,omitempty"`
+}
+
+// Webhook settings; the token itself lives outside the repo.
+type Webhook struct {
+	// Branch limits deploys to pushes to this branch ("" deploys on any push).
+	Branch string `toml:"branch,omitempty"`
+}
+
 type App struct {
-	Name    string   `toml:"name"`
-	Source  string   `toml:"source"`
-	Package string   `toml:"package,omitempty"`
-	Command string   `toml:"command,omitempty"`
-	Domains []string `toml:"domains,omitempty"`
+	Name    string `toml:"name"`
+	Source  string `toml:"source"`
+	Package string `toml:"package,omitempty"`
+	Command string `toml:"command,omitempty"`
+	// PreStart runs (from the package, with the app's environment) before
+	// every start of a slot, e.g. database migrations. Must be idempotent.
+	PreStart string   `toml:"pre_start,omitempty"`
+	Domains  []string `toml:"domains,omitempty"`
 	// PortBase is the blue slot's port; green uses PortBase+1.
-	PortBase      int               `toml:"port_base"`
-	FollowNixpkgs *bool             `toml:"follow_nixpkgs,omitempty"`
-	Health        *Health           `toml:"health,omitempty"`
-	Env           map[string]string `toml:"env,omitempty"`
-	Secrets       []string          `toml:"secrets,omitempty"`
-	Databases     []Database        `toml:"databases,omitempty"`
-	Hardening     map[string]any    `toml:"hardening,omitempty"`
+	PortBase      int   `toml:"port_base"`
+	FollowNixpkgs *bool `toml:"follow_nixpkgs,omitempty"`
+	// Path lists nixpkgs attributes whose bin/ the app gets on its PATH.
+	Path      []string          `toml:"path,omitempty"`
+	Health    *Health           `toml:"health,omitempty"`
+	Env       map[string]string `toml:"env,omitempty"`
+	Secrets   []string          `toml:"secrets,omitempty"`
+	Databases []Database        `toml:"databases,omitempty"`
+	Resources *Resources        `toml:"resources,omitempty"`
+	Backup    *Backup           `toml:"backup,omitempty"`
+	Webhook   *Webhook          `toml:"webhook,omitempty"`
+	Hardening map[string]any    `toml:"hardening,omitempty"`
+}
+
+// HasDatabase reports whether the app has a database of kind.
+func (a *App) HasDatabase(kind string) bool {
+	for _, d := range a.Databases {
+		if d.Kind == kind {
+			return true
+		}
+	}
+	return false
+}
+
+// WebhookBranch returns the branch webhook deploys are limited to.
+func (a *App) WebhookBranch() string {
+	if a.Webhook == nil {
+		return ""
+	}
+	return a.Webhook.Branch
 }
 
 // FollowsNixpkgs reports whether the app's nixpkgs input should follow the
@@ -52,25 +99,23 @@ func (a *App) FollowsNixpkgs() bool {
 }
 
 var (
-	nameRe    = regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}[a-z0-9]$`)
-	envKeyRe  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-	domainRe  = regexp.MustCompile(`^(?i:[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(\.(?i:[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?))*$`)
 	commandRe = regexp.MustCompile(`^[A-Za-z0-9._/+-]+$`)
+	attrRe    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_'+-]*(\.[A-Za-z_][A-Za-z0-9_'+-]*)*$`)
+	branchRe  = regexp.MustCompile(`^[A-Za-z0-9._/-]{1,100}$`)
+	healthRe  = regexp.MustCompile(`^/[!-~]*$`)
+	versionRe = regexp.MustCompile(`^[0-9]{1,3}$`)
 )
 
-// reservedEnv are set by coolix itself.
-var reservedEnv = map[string]bool{
-	"PORT": true, "DATABASE_URL": true, "REDIS_URL": true,
-	"PGHOST": true, "PGUSER": true, "PGDATABASE": true,
+func validCommand(c string) bool {
+	return commandRe.MatchString(c) && !strings.HasPrefix(c, "/") && !strings.Contains(c, "..")
 }
 
-var versionRe = regexp.MustCompile(`^[0-9]{1,3}$`)
-
-// Validate checks everything that ends up interpolated into flake.nix or unit
-// files, so a bad app.toml fails here instead of producing broken Nix.
+// Validate checks everything that ends up interpolated into flake.nix or the
+// profile manifest, so a bad app.toml fails here instead of producing broken
+// Nix. Root checks the manifest again (package units) before activating.
 func (a *App) Validate() error {
 	var errs []error
-	if !nameRe.MatchString(a.Name) {
+	if !units.ValidName(a.Name) {
 		errs = append(errs, fmt.Errorf("name %q: must be 2-32 chars of a-z, 0-9 and -, starting with a letter", a.Name))
 	}
 	if a.Source == "" {
@@ -78,33 +123,51 @@ func (a *App) Validate() error {
 	} else if strings.ContainsAny(a.Source, "\"\\$\n\r\t ") {
 		errs = append(errs, fmt.Errorf("source %q: must not contain quotes, backslashes, $ or whitespace", a.Source))
 	}
-	if a.Package != "" && !envKeyRe.MatchString(strings.ReplaceAll(a.Package, "-", "_")) {
+	if a.Package != "" && !attrRe.MatchString(a.Package) {
 		errs = append(errs, fmt.Errorf("package %q: invalid attribute name", a.Package))
 	}
-	if a.Command != "" && (!commandRe.MatchString(a.Command) || strings.HasPrefix(a.Command, "/") || strings.Contains(a.Command, "..")) {
+	if a.Command != "" && !validCommand(a.Command) {
 		errs = append(errs, fmt.Errorf("command %q: must be a relative path inside the package, e.g. bin/server", a.Command))
 	}
+	if a.PreStart != "" && !validCommand(a.PreStart) {
+		errs = append(errs, fmt.Errorf("pre_start %q: must be a relative path inside the package, e.g. bin/migrate", a.PreStart))
+	}
 	for _, d := range a.Domains {
-		if !domainRe.MatchString(d) {
+		if !units.ValidDomain(d) {
 			errs = append(errs, fmt.Errorf("domain %q: invalid hostname", d))
 		}
 	}
 	if a.PortBase <= 0 || a.PortBase+1 > 65535 {
 		errs = append(errs, fmt.Errorf("port_base %d: out of range", a.PortBase))
 	}
-	for k := range a.Env {
+	for _, p := range a.Path {
+		if !attrRe.MatchString(p) {
+			errs = append(errs, fmt.Errorf("path %q: want a nixpkgs attribute, e.g. ffmpeg or python3Packages.gunicorn", p))
+		}
+	}
+	if a.Health != nil {
+		if a.Health.Path != "" && !healthRe.MatchString(a.Health.Path) {
+			errs = append(errs, fmt.Errorf("health path %q: must start with / and contain no spaces", a.Health.Path))
+		}
+		if err := units.CheckHealthTimeout(a.Health.Timeout); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	for k, v := range a.Env {
 		switch {
-		case !envKeyRe.MatchString(k):
+		case !units.ValidEnvKey(k):
 			errs = append(errs, fmt.Errorf("env %q: invalid variable name", k))
-		case reservedEnv[k] || strings.HasPrefix(k, "COOLIX_"):
+		case units.ReservedEnv(k):
 			errs = append(errs, fmt.Errorf("env %q: reserved by coolix", k))
+		case strings.ContainsRune(v, 0):
+			errs = append(errs, fmt.Errorf("env %s: value contains a NUL byte", k))
 		}
 	}
 	for _, k := range a.Secrets {
 		switch {
-		case !envKeyRe.MatchString(k):
+		case !units.ValidEnvKey(k):
 			errs = append(errs, fmt.Errorf("secret %q: invalid variable name", k))
-		case reservedEnv[k] || strings.HasPrefix(k, "COOLIX_"):
+		case units.ReservedEnv(k):
 			errs = append(errs, fmt.Errorf("secret %q: reserved by coolix", k))
 		case a.Env[k] != "":
 			errs = append(errs, fmt.Errorf("secret %q: also set as a plain env var", k))
@@ -121,6 +184,22 @@ func (a *App) Validate() error {
 			errs = append(errs, fmt.Errorf("database %s: version %q: only postgres takes a major version, e.g. \"18\"", db.Kind, db.Version))
 		}
 		seen[db.Kind] = true
+	}
+	if a.Resources != nil {
+		if err := units.CheckResources(units.Resources(*a.Resources)); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if a.Backup != nil {
+		if err := units.CheckBackup(units.Backup(*a.Backup), seen["postgres"]); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if b := a.WebhookBranch(); b != "" && (!branchRe.MatchString(b) || strings.Contains(b, "..")) {
+		errs = append(errs, fmt.Errorf("webhook branch %q: invalid branch name", b))
+	}
+	if err := units.CheckHardening(a.Hardening); err != nil {
+		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
 }

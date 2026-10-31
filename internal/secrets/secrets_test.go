@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -97,5 +98,29 @@ func TestPendingAndApply(t *testing.T) {
 	vars, _ = s.read(ctx, "blog")
 	if !reflect.DeepEqual(vars, map[string]string{"C": "3"}) {
 		t.Fatalf("second apply = %v", vars)
+	}
+}
+
+func TestApplyRefusesSymlinks(t *testing.T) {
+	ctx := context.Background()
+	s := fakeStore(t)
+	outside := t.TempDir()
+	os.WriteFile(filepath.Join(outside, "blog.json"), []byte(`{"set":{"STOLEN":"x"}}`), 0o600)
+
+	// A symlinked pending file.
+	pending := t.TempDir()
+	os.Symlink(filepath.Join(outside, "blog.json"), filepath.Join(pending, "blog.json"))
+	if _, err := s.Apply(ctx, pending, []string{"blog"}, nil); err == nil {
+		t.Fatal("followed a symlinked pending file")
+	}
+
+	// A symlinked pending directory.
+	link := filepath.Join(t.TempDir(), "pending")
+	os.Symlink(outside, link)
+	if _, err := s.Apply(ctx, link, []string{"blog"}, nil); err == nil {
+		t.Fatal("followed a symlinked pending directory")
+	}
+	if _, err := os.Stat(s.CredPath("blog")); err == nil {
+		t.Fatal("credential written from a symlink")
 	}
 }

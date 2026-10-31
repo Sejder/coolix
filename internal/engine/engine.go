@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"coolix/internal/activate"
+	"coolix/internal/query"
 	"coolix/internal/repo"
+	"coolix/internal/units"
 )
 
 type Config struct {
@@ -28,6 +30,14 @@ type Config struct {
 	Drain            time.Duration
 	KeepGenerations  int
 	SecretsDir       string // root-owned encrypted credentials
+	// RenderDir holds root-rendered units; Exec is the coolix binary they call.
+	RenderDir, Exec string
+	// UIDomain can't be claimed by apps.
+	UIDomain string
+	// QuerySocket is the coolix-query socket; empty answers in-process.
+	QuerySocket string
+	// BackupDir is where root sees app backups (for in-process queries).
+	BackupDir string
 }
 
 func envOr(k, def string) string {
@@ -40,16 +50,21 @@ func envOr(k, def string) string {
 // ConfigFromEnv reads the COOLIX_* variables set by the NixOS module's wrapper.
 func ConfigFromEnv() (*Config, error) {
 	c := &Config{
-		StateDir:   envOr("COOLIX_STATE_DIR", "/var/lib/coolix"),
-		User:       os.Getenv("COOLIX_USER"),
-		Nixpkgs:    os.Getenv("COOLIX_NIXPKGS"),
-		Lib:        os.Getenv("COOLIX_LIB"),
-		System:     os.Getenv("COOLIX_SYSTEM"),
-		Profile:    envOr("COOLIX_PROFILE", activate.DefaultProfile),
-		UnitDir:    envOr("COOLIX_UNIT_DIR", activate.DefaultUnitDir),
-		CaddyDir:   os.Getenv("COOLIX_CADDY_DIR"),
-		TLS:        envOr("COOLIX_TLS", "acme"),
-		SecretsDir: envOr("COOLIX_SECRETS_DIR", "/var/lib/coolix-secrets"),
+		StateDir:    envOr("COOLIX_STATE_DIR", "/var/lib/coolix"),
+		User:        os.Getenv("COOLIX_USER"),
+		Nixpkgs:     os.Getenv("COOLIX_NIXPKGS"),
+		Lib:         os.Getenv("COOLIX_LIB"),
+		System:      os.Getenv("COOLIX_SYSTEM"),
+		Profile:     envOr("COOLIX_PROFILE", activate.DefaultProfile),
+		UnitDir:     envOr("COOLIX_UNIT_DIR", activate.DefaultUnitDir),
+		CaddyDir:    os.Getenv("COOLIX_CADDY_DIR"),
+		TLS:         envOr("COOLIX_TLS", "acme"),
+		SecretsDir:  envOr("COOLIX_SECRETS_DIR", "/var/lib/coolix-secrets"),
+		RenderDir:   envOr("COOLIX_RENDER_DIR", activate.DefaultRenderDir),
+		Exec:        os.Getenv("COOLIX_EXEC"),
+		UIDomain:    os.Getenv("COOLIX_UI_DOMAIN"),
+		QuerySocket: os.Getenv("COOLIX_QUERY_SOCKET"),
+		BackupDir:   envOr("COOLIX_BACKUP_DIR", "/var/lib/private/coolix-backups"),
 	}
 	var err error
 	ints := []struct {
@@ -96,4 +111,22 @@ func ShortRev(rev string) string {
 		return rev[:12]
 	}
 	return rev
+}
+
+// Query returns a client for root-level read-only data (logs, backups).
+func (c *Config) Query() query.Client {
+	return query.Client{Socket: c.QuerySocket, Local: &query.Server{BackupDir: c.BackupDir}}
+}
+
+// Policy is what the root activator enforces on profiles.
+func (c *Config) Policy() units.Policy {
+	p := units.Policy{PortMin: c.PortMin, PortMax: c.PortMax}
+	if c.UIDomain != "" {
+		p.ReservedDomains = []string{c.UIDomain}
+	}
+	return p
+}
+
+func (c *Config) Options() units.Options {
+	return units.Options{Exec: c.Exec, SecretsDir: c.SecretsDir}
 }

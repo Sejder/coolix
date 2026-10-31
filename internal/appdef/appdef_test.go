@@ -30,6 +30,13 @@ func TestValidateRejects(t *testing.T) {
 		"coolix env":       func(a *App) { a.Env = map[string]string{"COOLIX_SLOT": "x"} },
 		"bad domain":       func(a *App) { a.Domains = []string{"bad domain"} },
 		"no port":          func(a *App) { a.PortBase = 0 },
+		"root hardening":   func(a *App) { a.Hardening = map[string]any{"DynamicUser": false} },
+		"path injection":   func(a *App) { a.Path = []string{"ffmpeg; rm -rf /"} },
+		"pre_start abs":    func(a *App) { a.PreStart = "/bin/sh" },
+		"backup no pg":     func(a *App) { a.Backup = &Backup{Schedule: "daily"} },
+		"memory":           func(a *App) { a.Resources = &Resources{MemoryMax: "lots"} },
+		"branch":           func(a *App) { a.Webhook = &Webhook{Branch: "a..b"} },
+		"path env":         func(a *App) { a.Env = map[string]string{"PATH": "/tmp"} },
 	}
 	for name, mutate := range cases {
 		a := valid()

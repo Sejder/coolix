@@ -8,17 +8,17 @@ import (
 	"embed"
 	"fmt"
 	"html/template"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
-	"coolix/internal/activate"
 	"coolix/internal/appdef"
 	"coolix/internal/engine"
+	"coolix/internal/webhook"
 )
 
 //go:embed templates static
@@ -42,6 +42,17 @@ func (s *Server) quiet() *engine.Engine { return &engine.Engine{Config: s.Config
 var funcs = template.FuncMap{
 	"join":     strings.Join,
 	"shortRev": engine.ShortRev,
+	"bytes": func(n int64) string {
+		switch {
+		case n >= 1<<30:
+			return fmt.Sprintf("%.1f GiB", float64(n)/(1<<30))
+		case n >= 1<<20:
+			return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
+		case n >= 1<<10:
+			return fmt.Sprintf("%.1f KiB", float64(n)/(1<<10))
+		}
+		return fmt.Sprintf("%d B", n)
+	},
 	"ago": func(t time.Time) string {
 		d := time.Since(t)
 		switch {
@@ -115,6 +126,7 @@ func (s *Server) Handler() (http.Handler, error) {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok\n")) })
 	mux.HandleFunc("GET /login", s.handleLogin)
 	mux.HandleFunc("POST /login", s.handleLogin)
+	mux.HandleFunc("POST /hooks/{name}", s.handleWebhook)
 
 	auth := http.NewServeMux()
 	auth.HandleFunc("POST /logout", s.handleLogout)
@@ -129,6 +141,9 @@ func (s *Server) Handler() (http.Handler, error) {
 	auth.HandleFunc("POST /apps/{name}/secrets", s.handleSetSecret)
 	auth.HandleFunc("POST /apps/{name}/secrets/{key}/delete", s.handleUnsetSecret)
 	auth.HandleFunc("GET /apps/{name}/logs", s.handleAppLogs)
+	auth.HandleFunc("POST /apps/{name}/webhook", s.handleWebhookSettings)
+	auth.HandleFunc("POST /apps/{name}/backups", s.handleBackup)
+	auth.HandleFunc("POST /apps/{name}/backups/{file}/restore", s.handleRestore)
 	auth.HandleFunc("GET /jobs/{id}", s.handleJob)
 	auth.HandleFunc("GET /jobs/{id}/events", s.handleJobEvents)
 	auth.HandleFunc("GET /generations", s.handleGenerations)
@@ -209,7 +224,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	redirect(w, r, "/apps/"+app.Name, "App created. Deploy it to start it.")
 }
 
-func (s *Server) appData(name string) (map[string]any, error) {
+func (s *Server) appData(r *http.Request, name string) (map[string]any, error) {
 	e := s.quiet()
 	app, err := e.App(name)
 	if err != nil {
@@ -229,18 +244,31 @@ func (s *Server) appData(name string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{
-		"Title":    name,
-		"App":      app,
-		"AppState": status,
-		"UpToDate": st.UpToDate,
-		"Secrets":  secrets,
-		"Jobs":     s.Jobs.Recent(5, name),
-	}, nil
+	token, err := e.WebhookToken(name)
+	if err != nil {
+		return nil, err
+	}
+	data := map[string]any{
+		"Title":      name,
+		"App":        app,
+		"AppState":   status,
+		"UpToDate":   st.UpToDate,
+		"Secrets":    secrets,
+		"Jobs":       s.Jobs.Recent(5, name),
+		"Webhook":    token != "",
+		"WebhookURL": webhookURL(r, name),
+	}
+	if app.HasDatabase("postgres") {
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+		backups, err := e.Backups(ctx, name)
+		data["Backups"], data["BackupsErr"] = backups, err
+	}
+	return data, nil
 }
 
 func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
-	data, err := s.appData(r.PathValue("name"))
+	data, err := s.appData(r, r.PathValue("name"))
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -260,7 +288,7 @@ func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		err = e.UpdateApp(app)
 	}
 	if err != nil {
-		data, derr := s.appData(name)
+		data, derr := s.appData(r, name)
 		if derr != nil {
 			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 			return
@@ -437,27 +465,131 @@ func (s *Server) handleAppLogs(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	args := []string{"--no-pager", "--follow", "--lines=200", "--output=short-iso", "--no-hostname"}
-	for _, slot := range activate.Slots {
-		args = append(args, "--unit="+activate.SlotUnit(name, slot))
-	}
-	args = append(args, "--unit=coolix-db-"+name+"-*.service")
-	cmd := exec.CommandContext(r.Context(), "journalctl", args...)
-	out, err := cmd.StdoutPipe()
-	if err != nil {
-		send("", "error: "+err.Error())
-		return
-	}
-	if err := cmd.Start(); err != nil {
-		send("", "error: "+err.Error())
-		return
-	}
-	defer cmd.Wait()
-	sc := bufio.NewScanner(out)
+	pr, pw := io.Pipe()
+	go func() {
+		pw.CloseWithError(s.quiet().Logs(r.Context(), name, 200, true, pw))
+	}()
+	defer pr.Close()
+	sc := bufio.NewScanner(pr)
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
 	for sc.Scan() {
 		send("", sc.Text())
 	}
+	if err := sc.Err(); err != nil && r.Context().Err() == nil {
+		send("", "error: "+err.Error())
+	}
+}
+
+// Webhooks ---------------------------------------------------------------
+
+// handleWebhook deploys an app when its forge reports a push. It's the only
+// unauthenticated POST: the request must carry the app's webhook signature.
+func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	e := s.quiet()
+	token, err := e.WebhookToken(name)
+	if err != nil || token == "" {
+		http.NotFound(w, r)
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	d, err := webhook.Verify(r.Header, body, token)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+	app, err := e.App(name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	switch {
+	case d.Ping():
+		fmt.Fprintln(w, `{"status":"pong"}`)
+		return
+	case !d.Push():
+		w.WriteHeader(http.StatusAccepted)
+		fmt.Fprintf(w, "{\"status\":\"ignored\",\"reason\":%q}\n", "event "+d.Event)
+		return
+	case !d.Matches(app.WebhookBranch()):
+		w.WriteHeader(http.StatusAccepted)
+		fmt.Fprintf(w, "{\"status\":\"ignored\",\"reason\":%q}\n", d.Ref+" is not "+app.WebhookBranch())
+		return
+	}
+	j := s.Jobs.Start("Deploy "+name+" (webhook from "+d.Provider+")", name, func(ctx context.Context, j *Job) error {
+		return s.engine(j).Deploy(ctx, name)
+	})
+	log.Printf("webhook: %s push %s: deploying %s as job %d", d.Provider, d.Ref, name, j.ID)
+	w.WriteHeader(http.StatusAccepted)
+	fmt.Fprintf(w, "{\"status\":\"deploying\",\"job\":%d}\n", j.ID)
+}
+
+func (s *Server) handleWebhookSettings(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	e := s.quiet()
+	if r.FormValue("action") == "disable" {
+		if err := e.DisableWebhook(name); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		redirect(w, r, "/apps/"+name, "Webhook disabled.")
+		return
+	}
+	token, err := e.EnableWebhook(name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	data, err := s.appData(r, name)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// Shown once, on this response only: it's not put in a URL or a flash.
+	data["NewWebhookToken"] = token
+	w.Header().Set("Cache-Control", "no-store")
+	s.render(w, r, "app", data)
+}
+
+// Backups ----------------------------------------------------------------
+
+func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if _, err := s.quiet().App(name); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	j := s.Jobs.Start("Back up "+name, name, func(ctx context.Context, j *Job) error {
+		return s.engine(j).Backup(ctx, name)
+	})
+	redirect(w, r, j.URL(), "")
+}
+
+func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
+	name, file := r.PathValue("name"), r.PathValue("file")
+	if r.FormValue("confirm") != name {
+		redirect(w, r, "/apps/"+name, "Type the app name to confirm the restore.")
+		return
+	}
+	j := s.Jobs.Start("Restore "+name+" from "+file, name, func(ctx context.Context, j *Job) error {
+		return s.engine(j).Restore(ctx, name, file)
+	})
+	redirect(w, r, j.URL(), "")
+}
+
+// webhookURL is where the forge should send deliveries, as seen by this
+// request (the UI is normally behind Caddy on its own domain).
+func webhookURL(r *http.Request, app string) string {
+	scheme := "https"
+	if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" {
+		scheme = "http"
+	}
+	return scheme + "://" + r.Host + "/hooks/" + app
 }
 
 // Forms ------------------------------------------------------------------
@@ -470,6 +602,8 @@ func applyForm(app *appdef.App, r *http.Request) error {
 	app.Source = strings.TrimSpace(r.FormValue("source"))
 	app.Package = strings.TrimSpace(r.FormValue("package"))
 	app.Command = strings.TrimSpace(r.FormValue("command"))
+	app.PreStart = strings.TrimSpace(r.FormValue("pre_start"))
+	app.Path = strings.Fields(r.FormValue("path"))
 	app.Domains = strings.Fields(r.FormValue("domains"))
 
 	path, timeout := strings.TrimSpace(r.FormValue("health_path")), strings.TrimSpace(r.FormValue("health_timeout"))
@@ -492,6 +626,37 @@ func applyForm(app *appdef.App, r *http.Request) error {
 			app.Env = map[string]string{}
 		}
 		app.Env[strings.TrimSpace(k)] = v
+	}
+
+	app.Resources = nil
+	res := appdef.Resources{MemoryMax: strings.TrimSpace(r.FormValue("memory_max")), CPUQuota: strings.TrimSpace(r.FormValue("cpu_quota"))}
+	if v := strings.TrimSpace(r.FormValue("tasks_max")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("tasks limit %q: want a number", v)
+		}
+		res.TasksMax = n
+	}
+	if res != (appdef.Resources{}) {
+		app.Resources = &res
+	}
+
+	app.Backup = nil
+	backup := appdef.Backup{Schedule: strings.TrimSpace(r.FormValue("backup_schedule"))}
+	if v := strings.TrimSpace(r.FormValue("backup_keep")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("backups to keep %q: want a number", v)
+		}
+		backup.Keep = n
+	}
+	if backup != (appdef.Backup{}) {
+		app.Backup = &backup
+	}
+
+	app.Webhook = nil
+	if b := strings.TrimSpace(r.FormValue("webhook_branch")); b != "" {
+		app.Webhook = &appdef.Webhook{Branch: b}
 	}
 
 	app.Databases = nil

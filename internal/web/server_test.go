@@ -10,10 +10,16 @@ import (
 	"strings"
 	"testing"
 
+	"coolix/internal/appdef"
 	"coolix/internal/engine"
 )
 
 func newTestServer(t *testing.T) (*httptest.Server, *http.Client) {
+	srv, c, _ := newTestServerWithEngine(t)
+	return srv, c
+}
+
+func newTestServerWithEngine(t *testing.T) (*httptest.Server, *http.Client, *engine.Engine) {
 	t.Helper()
 	dir := t.TempDir()
 	pw := filepath.Join(dir, "pw")
@@ -33,7 +39,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *http.Client) {
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 	jar, _ := cookiejar.New(nil)
-	return srv, &http.Client{Jar: jar}
+	return srv, &http.Client{Jar: jar}, &engine.Engine{Config: s.Config, Out: os.Stderr}
 }
 
 func body(t *testing.T, resp *http.Response) string {
@@ -130,5 +136,49 @@ func TestForgedSessionRejected(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusSeeOther || resp.Header.Get("Location") != "/login" {
 		t.Fatalf("forged session: %d %s", resp.StatusCode, resp.Header.Get("Location"))
+	}
+}
+
+func TestWebhookAuth(t *testing.T) {
+	srv, _, e := newTestServerWithEngine(t)
+	post := func(app string, h map[string]string) int {
+		req, _ := http.NewRequest("POST", srv.URL+"/hooks/"+app, strings.NewReader(`{"ref":"refs/heads/main"}`))
+		for k, v := range h {
+			req.Header.Set(k, v)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if got := post("nope", nil); got != 404 {
+		t.Errorf("unknown app: %d", got)
+	}
+	if err := e.CreateApp(&appdef.App{Name: "blog", Source: "github:me/blog"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := post("blog", map[string]string{"Authorization": "Bearer x"}); got != 404 {
+		t.Errorf("webhook off: %d", got)
+	}
+	token, err := e.EnableWebhook("blog")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := post("blog", map[string]string{"Authorization": "Bearer wrong"}); got != 401 {
+		t.Errorf("bad token: %d", got)
+	}
+	if got := post("blog", map[string]string{"X-Gitlab-Token": token, "X-Gitlab-Event": "Tag Push Hook"}); got != 202 {
+		t.Errorf("ignored event: %d", got)
+	}
+	if got := post("blog", map[string]string{"X-Gitlab-Token": token, "X-Gitlab-Event": "ping"}); got != 200 {
+		t.Errorf("ping: %d", got)
+	}
+	if err := e.RemoveApp("blog"); err != nil {
+		t.Fatal(err)
+	}
+	if tok, _ := e.WebhookToken("blog"); tok != "" {
+		t.Error("token survived app removal")
 	}
 }

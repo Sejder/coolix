@@ -4,6 +4,10 @@
 let
   cfg = config.services.coolix;
   caddyDir = "/run/coolix/caddy";
+  querySocket = "/run/coolix/query.sock";
+  # Rendered units call the (unwrapped) coolix binary through this stable
+  # path, so upgrading coolix doesn't change, and restart, every app unit.
+  execPath = "/etc/coolix/coolix";
 
   env = {
     COOLIX_STATE_DIR = cfg.stateDir;
@@ -15,6 +19,10 @@ let
     COOLIX_PORT_MAX = toString cfg.portRange.to;
     COOLIX_DRAIN = cfg.drainTime;
     COOLIX_KEEP_GENERATIONS = toString cfg.keepGenerations;
+    COOLIX_EXEC = execPath;
+    COOLIX_QUERY_SOCKET = querySocket;
+  } // lib.optionalAttrs (cfg.ui.domain != null) {
+    COOLIX_UI_DOMAIN = cfg.ui.domain;
   } // lib.optionalAttrs cfg.caddy.enable {
     COOLIX_CADDY_DIR = caddyDir;
     COOLIX_TLS = cfg.caddy.tls;
@@ -146,16 +154,16 @@ in
     nix.settings.experimental-features = [ "nix-command" "flakes" ];
 
     environment.systemPackages = [ coolix ];
+    environment.etc."coolix/coolix".source = "${cfg.package}/bin/coolix";
 
-    # Owns the apps repo and runs builds. It can start coolix-activate@ units
-    # (and only those), which makes it able to deploy arbitrary units: treat
-    # access to this user as root-equivalent. The split keeps root out of
-    # git/nix evaluation of app code.
+    # Owns the apps repo and runs builds; the web UI runs as this user. It
+    # can deploy any code into an app's sandbox, but not change the sandbox:
+    # root validates every profile and renders the units itself. It reads
+    # logs and backups through coolix-query, not the systemd-journal group.
     users.users.coolix = {
       isSystemUser = true;
       group = "coolix";
       home = cfg.stateDir;
-      extraGroups = [ "systemd-journal" ];
     };
     users.groups.coolix = { };
 
@@ -164,10 +172,12 @@ in
       "d /nix/var/nix/profiles/coolix 0755 root root -"
       # Encrypted app secrets; written only by the root activator.
       "d /var/lib/coolix-secrets 0700 root root -"
+      "d /run/coolix 0755 root root -"
     ] ++ lib.optional cfg.caddy.enable "d ${caddyDir} 0755 root root -";
 
     # Privileged half of a deploy. The instance is the profile's store path
-    # basename; `coolix activate-store` validates it before touching anything.
+    # basename; `coolix activate-store` validates it and the profile's
+    # manifest before touching anything.
     systemd.services."coolix-activate@" = {
       description = "Activate coolix app profile %i";
       serviceConfig = {
@@ -176,17 +186,72 @@ in
       };
     };
 
+    # The coolix user may start activations, and backups/restores of app
+    # databases (units root rendered, running as the app's user). Nothing else.
     security.polkit.enable = true;
     security.polkit.extraConfig = ''
       polkit.addRule(function(action, subject) {
         if (action.id == "org.freedesktop.systemd1.manage-units" &&
             subject.user == "coolix" &&
-            action.lookup("verb") == "start" &&
-            /^coolix-activate@[0-9a-z]{32}-coolix-app-profile\.service$/.test(action.lookup("unit"))) {
-          return polkit.Result.YES;
+            action.lookup("verb") == "start") {
+          var unit = action.lookup("unit");
+          if (/^coolix-activate@[0-9a-df-np-sv-z]{32}-coolix-app-profile\.service$/.test(unit) ||
+              /^coolix-backup-[a-z][a-z0-9-]{0,30}[a-z0-9]\.service$/.test(unit) ||
+              /^coolix-restore-[a-z][a-z0-9-]{0,30}[a-z0-9]@[0-9]{8}T[0-9]{6}Z\.dump\.service$/.test(unit)) {
+            return polkit.Result.YES;
+          }
         }
       });
     '';
+
+    # Read-only answers for the coolix user: app logs, activation/backup
+    # output and backup listings. One instance per connection, as a dynamic
+    # user that may read the journal and (via a read-only bind mount) the
+    # backup directories, and nothing else.
+    systemd.sockets.coolix-query = {
+      description = "coolix query socket";
+      wantedBy = [ "sockets.target" ];
+      socketConfig = {
+        ListenStream = querySocket;
+        Accept = true;
+        SocketUser = "root";
+        SocketGroup = "coolix";
+        SocketMode = "0660";
+        MaxConnections = 64;
+      };
+    };
+    systemd.services."coolix-query@" = {
+      description = "coolix query";
+      serviceConfig = {
+        ExecStart = "${coolix}/bin/coolix query-serve";
+        StandardInput = "socket";
+        StandardOutput = "socket";
+        StandardError = "journal";
+        Environment = "COOLIX_BACKUP_DIR=/run/coolix-backups";
+        BindReadOnlyPaths = [ "-/var/lib/private/coolix-backups:/run/coolix-backups" ];
+        DynamicUser = true;
+        SupplementaryGroups = [ "systemd-journal" ];
+        RuntimeMaxSec = "1d";
+        NoNewPrivileges = true;
+        CapabilityBoundingSet = "";
+        PrivateNetwork = true;
+        PrivateDevices = true;
+        ProtectHome = true;
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectKernelLogs = true;
+        ProtectControlGroups = true;
+        ProtectClock = true;
+        ProtectHostname = true;
+        RestrictAddressFamilies = "AF_UNIX";
+        RestrictNamespaces = true;
+        RestrictRealtime = true;
+        LockPersonality = true;
+        MemoryDenyWriteExecute = true;
+        SystemCallArchitectures = "native";
+        SystemCallFilter = "@system-service";
+      };
+    };
 
     # App units live in /run/systemd/system (outside NixOS' control), so they
     # need to be re-linked from the current app profile on every boot.

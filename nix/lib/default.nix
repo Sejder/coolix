@@ -1,9 +1,9 @@
 { lib }:
 
 {
-  # Turn a coolix apps repo (apps/<name>/app.toml) into an app profile:
-  #   $out/units/coolix-app-<name>@.service   templated unit, instance = slot (blue|green)
-  #   $out/apps.json                           manifest read by the coolix activator
+  # Turn a coolix apps repo (apps/<name>/app.toml) into an app profile whose
+  # only content is $out/apps.json: the apps' store paths and settings. It
+  # references every package, so the profile's generations keep them alive.
   mkAppProfile = { inputs, root, system }:
     let
       pkgs = inputs.nixpkgs.legacyPackages.${system};
@@ -13,24 +13,19 @@
         (n: t: t == "directory" && builtins.pathExists (appsDir + "/${n}/app.toml"))
         entries);
 
-      apps = lib.genAttrs names (name: import ./app.nix {
+      apps = lib.genAttrs names (name: (import ./app.nix {
         inherit pkgs lib inputs system name;
         dir = appsDir + "/${name}";
-      });
+      }).manifest);
 
       manifest = pkgs.writeText "coolix-apps.json" (builtins.toJSON {
-        version = 1;
+        version = 2;
         rev = inputs.self.rev or inputs.self.dirtyRev or "unknown";
-        apps = lib.mapAttrs (_: app: app.manifest) apps;
-        services = lib.concatMap (app: app.serviceNames) (lib.attrValues apps);
+        inherit apps;
       });
 
       profile = pkgs.runCommandLocal "coolix-app-profile" { } ''
-        mkdir -p $out/units
-        ${lib.concatMapStrings (app: ''
-          cp ${app.unit} $out/units/${app.unitName}
-          ${lib.concatStrings (lib.mapAttrsToList (n: u: "cp ${u} $out/units/${n}\n") app.services)}
-        '') (lib.attrValues apps)}
+        mkdir $out
         cp ${manifest} $out/apps.json
       '';
     in

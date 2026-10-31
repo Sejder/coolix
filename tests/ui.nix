@@ -31,12 +31,13 @@ in
       flake-registry = "";
     };
     environment.etc."coolix-test-app".source = ./app;
-    environment.systemPackages = [ pkgs.curl pkgs.git pkgs.chromium pkgs.chromedriver python ];
+    environment.systemPackages = [ pkgs.curl pkgs.git pkgs.openssl pkgs.chromium pkgs.chromedriver python ];
     fonts.packages = [ pkgs.inter pkgs.jetbrains-mono ];
 
     system.extraDependencies = [
       (testApp "v1")
       (testApp "v2")
+      (testApp "v3")
       pkgs.stdenvNoCC
       pkgs.bash
       pkgs.coreutils
@@ -72,6 +73,17 @@ in
         )
         machine.succeed("curl -sf http://hello.test/ | grep -x v2")
         machine.copy_from_machine("/tmp/screenshots")
+
+    with subtest("a signed push webhook deploys the app"):
+        machine.succeed("echo v3 > /srv/hello/VERSION")
+        token = machine.succeed("coolix webhook enable hello | awk '/^Secret:/ {print $2}'").strip()
+        body = '{"ref":"refs/heads/main"}'
+        sig = machine.succeed(f"printf %s '{body}' | openssl dgst -sha256 -hmac {token} -r | cut -d' ' -f1").strip()
+        hook = "curl -sf -X POST -H 'X-GitHub-Event: push' -H 'Content-Type: application/json'"
+        machine.fail(f"{hook} -H 'X-Hub-Signature-256: sha256=00' -d '{body}' http://coolix.test/hooks/hello")
+        out = machine.succeed(f"{hook} -H 'X-Hub-Signature-256: sha256={sig}' -d '{body}' http://coolix.test/hooks/hello")
+        assert "deploying" in out, out
+        machine.wait_until_succeeds("curl -sf http://hello.test/ | grep -x v3", timeout=120)
 
     with subtest("UI service runs unprivileged"):
         machine.succeed("test $(systemctl show coolix -p User --value) = coolix")
