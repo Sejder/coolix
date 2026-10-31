@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -243,6 +244,12 @@ func (a *Activator) Activate(ctx context.Context, profileDir string) (*Result, e
 		}
 	}
 	for _, unit := range stopLater {
+		// Keep what a failed app's old slot still uses (its database);
+		// the previous generation gets re-activated.
+		if app := units.AppOfAnyUnit(unit); app != "" && (slices.Contains(res.Failed, app) || slices.Contains(res.Down, app)) {
+			a.logf("keeping %s: %s didn't switch", unit, app)
+			continue
+		}
 		a.logf("stopping removed unit %s", unit)
 		a.warn(a.Systemd.Stop(unit))
 		if err := os.Remove(filepath.Join(a.UnitDir, unit)); err != nil {

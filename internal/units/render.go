@@ -91,6 +91,9 @@ var baseHardening = [][2]string{
 	{"SystemCallArchitectures", "native"},
 	{"SystemCallFilter", "@system-service"},
 	{"UMask", "0077"},
+	// The root nix-daemon: apps could build outside their limits or fill
+	// the store through it.
+	{"InaccessiblePaths", "-/nix/var/nix/daemon-socket"},
 }
 
 type unit struct {
@@ -372,4 +375,31 @@ func renderTimer(name, schedule string) string {
 	u.set("RandomizedDelaySec", "5min")
 	u.set("Unit", BackupUnit(name))
 	return u.b.String()
+}
+
+// AppOfAnyUnit returns the app a coolix unit file belongs to, or "".
+func AppOfAnyUnit(unit string) string {
+	if app := AppOfUnit(unit); app != "" {
+		return app
+	}
+	if rest, ok := strings.CutPrefix(unit, DBPrefix); ok {
+		for _, kind := range []string{"-postgres.service", "-redis.service"} {
+			if app, ok := strings.CutSuffix(rest, kind); ok {
+				return app
+			}
+		}
+	}
+	if rest, ok := strings.CutPrefix(unit, BackupPrefix); ok {
+		for _, suffix := range []string{".service", ".timer"} {
+			if app, ok := strings.CutSuffix(rest, suffix); ok {
+				return app
+			}
+		}
+	}
+	if rest, ok := strings.CutPrefix(unit, RestorePrefix); ok {
+		if app, ok := strings.CutSuffix(rest, "@.service"); ok {
+			return app
+		}
+	}
+	return ""
 }

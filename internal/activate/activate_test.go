@@ -281,3 +281,33 @@ func TestRemovedDatabaseStopsAfterSwitch(t *testing.T) {
 		t.Fatalf("database must stop after the new slot started: %v", sd.calls)
 	}
 }
+
+func TestFailedSwitchKeepsRemovedDatabase(t *testing.T) {
+	ctx := context.Background()
+	a, sd, _ := newActivator(t)
+	if _, err := a.Activate(ctx, mkProfile(t, map[string]string{"blog": "v1"}, "blog")); err != nil {
+		t.Fatal(err)
+	}
+	a.Health = func(context.Context, int, string) error { return errors.New("down") }
+	if _, err := a.Activate(ctx, mkProfile(t, map[string]string{"blog": "v2"})); err == nil {
+		t.Fatal("expected failure")
+	}
+	if !sd.active["coolix-db-blog-postgres.service"] {
+		t.Fatal("database of the still-serving old slot was stopped")
+	}
+}
+
+func TestAppOfAnyUnit(t *testing.T) {
+	for unit, want := range map[string]string{
+		"coolix-app-a-b@.service":        "a-b",
+		"coolix-db-a-b-postgres.service": "a-b",
+		"coolix-db-x-redis.service":      "x",
+		"coolix-backup-blog.timer":       "blog",
+		"coolix-restore-blog@.service":   "blog",
+		"sshd.service":                   "",
+	} {
+		if got := units.AppOfAnyUnit(unit); got != want {
+			t.Errorf("%s: %q", unit, got)
+		}
+	}
+}

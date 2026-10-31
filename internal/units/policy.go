@@ -87,8 +87,37 @@ var relaxable = map[string]bool{
 // or groups to the allow list.
 var stringSettings = map[string]*regexp.Regexp{
 	"RestrictAddressFamilies": regexp.MustCompile(`^AF_[A-Z0-9]+( +AF_[A-Z0-9]+)*$`),
-	"SystemCallFilter":        regexp.MustCompile(`^@?[a-z0-9_-]+( +@?[a-z0-9_-]+)*$`),
+	"SystemCallFilter":        regexp.MustCompile(`^@?[a-z0-9_]+( +@?[a-z0-9_]+)*$`),
 	"UMask":                   regexp.MustCompile(`^0[0-7]{3}$`),
+}
+
+// Additions apps may make to RestrictAddressFamilies and SystemCallFilter.
+// Everything else (AF_ALG, AF_VSOCK, @known, @privileged, @debug, bpf, ...)
+// would reopen kernel attack surface the sandbox exists to close.
+var (
+	allowedFamilies = map[string]bool{"AF_NETLINK": true}
+	allowedSyscalls = map[string]bool{
+		"@pkey": true, "@sync": true, "@timer": true, "@keyring": true, "@memlock": true,
+		"@resources": true, "@setuid": true, "@chown": true, "@ipc": true,
+	}
+)
+
+func checkAdditions(key, value string) error {
+	allowed := allowedSyscalls
+	if key == "RestrictAddressFamilies" {
+		allowed = allowedFamilies
+	}
+	for _, tok := range strings.Fields(value) {
+		if !allowed[tok] {
+			keys := make([]string, 0, len(allowed))
+			for k := range allowed {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			return fmt.Errorf("hardening %s: %s can't be added (allowed: %s)", key, tok, strings.Join(keys, " "))
+		}
+	}
+	return nil
 }
 
 // DefaultAllowedHardening are the [hardening] keys apps may use unless the
@@ -97,7 +126,6 @@ var stringSettings = map[string]*regexp.Regexp{
 var DefaultAllowedHardening = []string{
 	"MemoryDenyWriteExecute", "PrivateTmp", "ProtectHome", "ProtectHostname",
 	"ProtectClock", "RestrictRealtime", "LockPersonality", "UMask",
-	"RestrictAddressFamilies", "SystemCallFilter",
 }
 
 // HardeningKeys lists every key [hardening] understands.
@@ -127,6 +155,10 @@ func CheckHardening(h map[string]any) error {
 		if re, ok := stringSettings[k]; ok {
 			if s, ok := v.(string); !ok || !re.MatchString(s) {
 				errs = append(errs, fmt.Errorf("hardening %s: invalid value %v", k, v))
+			} else if k != "UMask" {
+				if err := checkAdditions(k, s); err != nil {
+					errs = append(errs, err)
+				}
 			}
 			continue
 		}

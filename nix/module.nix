@@ -121,7 +121,7 @@ in
         ]);
         default = [
           "MemoryDenyWriteExecute" "PrivateTmp" "ProtectHome" "ProtectHostname" "ProtectClock"
-          "RestrictRealtime" "LockPersonality" "UMask" "RestrictAddressFamilies" "SystemCallFilter"
+          "RestrictRealtime" "LockPersonality" "UMask"
         ];
         description = ''
           `[hardening]` keys apps may set in `app.toml`. None of them can grant

@@ -166,7 +166,12 @@ func TestAdditiveHardening(t *testing.T) {
 	a := m.Apps["blog"]
 	a.Hardening = map[string]any{"SystemCallFilter": "@pkey", "RestrictAddressFamilies": "AF_NETLINK"}
 	m.Apps["blog"] = a
-	if err := policy.Validate(m); err != nil {
+	if policy.Validate(m) == nil {
+		t.Fatal("syscall/family additions must be opt-in for the host")
+	}
+	p := policy
+	p.AllowedHardening = append([]string{"SystemCallFilter", "RestrictAddressFamilies"}, DefaultAllowedHardening...)
+	if err := p.Validate(m); err != nil {
 		t.Fatal(err)
 	}
 	unit := Render(m, Options{Exec: "/x"}).Files["coolix-app-blog@.service"]
@@ -178,10 +183,20 @@ func TestAdditiveHardening(t *testing.T) {
 			t.Errorf("want %q in\n%s", want, unit)
 		}
 	}
+	// Even when allowed, only vetted additions.
+	for _, bad := range []map[string]any{
+		{"SystemCallFilter": "@known"}, {"SystemCallFilter": "@privileged"}, {"SystemCallFilter": "bpf"},
+		{"RestrictAddressFamilies": "AF_ALG"}, {"RestrictAddressFamilies": "AF_VSOCK"},
+	} {
+		a.Hardening = bad
+		m.Apps["blog"] = a
+		if p.Validate(m) == nil {
+			t.Errorf("%v accepted", bad)
+		}
+	}
 	// The host can allow more.
 	a.Hardening = map[string]any{"RestrictNamespaces": false}
 	m.Apps["blog"] = a
-	p := policy
 	p.AllowedHardening = append([]string{"RestrictNamespaces"}, DefaultAllowedHardening...)
 	if err := p.Validate(m); err != nil {
 		t.Fatal(err)
