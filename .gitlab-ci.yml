@@ -1,0 +1,26 @@
+# All CI logic lives in `nix flake check` / nix commands so it ports to any
+# runner (and to GitHub Actions later) unchanged.
+image: nixos/nix:latest
+
+variables:
+  NIX_CONFIG: "experimental-features = nix-command flakes"
+
+stages: [test]
+
+go-test:
+  stage: test
+  script:
+    - nix develop -c go vet ./...
+    - nix develop -c go test ./...
+
+build:
+  stage: test
+  script:
+    - nix build -L .#coolix
+
+# NixOS VM tests need /dev/kvm on the runner.
+vm-test:
+  stage: test
+  script:
+    - test -w /dev/kvm || { echo "runner has no /dev/kvm"; exit 1; }
+    - nix build -L .#checks.x86_64-linux.vm-basic
