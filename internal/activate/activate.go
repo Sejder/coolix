@@ -78,6 +78,10 @@ type Activator struct {
 	// unchanged (e.g. their secrets changed).
 	ForceRestart map[string]bool
 	Log          func(format string, args ...any)
+	// SkipInvalid drops apps that fail the policy instead of refusing the
+	// whole profile. Used at boot, where the policy may have changed since
+	// the profile was deployed (e.g. a narrower port range).
+	SkipInvalid bool
 	// Now/Sleep are overridable for tests.
 	Sleep func(time.Duration)
 	Now   func() time.Time
@@ -85,6 +89,10 @@ type Activator struct {
 
 type Result struct {
 	Started, Switched, Unchanged, Removed, Failed []string
+	// Down lists unchanged apps that are not running and failed to start.
+	// They don't fail the activation: a deploy of other apps shouldn't be
+	// rolled back because one app was already broken.
+	Down []string
 }
 
 type state int
@@ -100,6 +108,13 @@ func (a *Activator) Load(profileDir string) (*units.Manifest, error) {
 	m, err := units.ReadManifest(profileDir)
 	if err != nil {
 		return nil, err
+	}
+	if a.SkipInvalid {
+		for name, err := range a.Policy.ValidateApps(m) {
+			a.logf("skipping app %s: %v", name, err)
+			delete(m.Apps, name)
+		}
+		return m, nil
 	}
 	if err := a.Policy.Validate(m); err != nil {
 		return nil, fmt.Errorf("refusing to activate %s: %w", profileDir, err)
@@ -147,7 +162,10 @@ func (a *Activator) Activate(ctx context.Context, profileDir string) (*Result, e
 	}
 
 	res := &Result{}
-	// Stop and unlink whatever the profile no longer contains.
+	// Stop and unlink whatever the profile no longer contains. Other units
+	// (databases, timers) are stopped only after the apps switched, so a
+	// serving slot keeps its database until its replacement is up.
+	var stopLater []string
 	for _, unit := range sortedKeys(current) {
 		if _, ok := states[unit]; ok {
 			continue
@@ -161,11 +179,12 @@ func (a *Activator) Activate(ctx context.Context, profileDir string) (*Result, e
 				a.warn(a.Router.RemoveRoute(name))
 			}
 			res.Removed = append(res.Removed, name)
+			if err := os.Remove(filepath.Join(a.UnitDir, unit)); err != nil {
+				return nil, err
+			}
 		} else if !strings.HasSuffix(unit, "@.service") {
-			a.logf("stopping removed unit %s", unit)
-			a.warn(a.Systemd.Stop(unit))
-		}
-		if err := os.Remove(filepath.Join(a.UnitDir, unit)); err != nil {
+			stopLater = append(stopLater, unit)
+		} else if err := os.Remove(filepath.Join(a.UnitDir, unit)); err != nil {
 			return nil, err
 		}
 	}
@@ -197,8 +216,8 @@ func (a *Activator) Activate(ctx context.Context, profileDir string) (*Result, e
 		st := states[unit]
 		if st == unchanged && !a.ForceRestart[name] {
 			if err := a.ensureRunning(ctx, name, app); err != nil {
-				errs = append(errs, fmt.Errorf("app %s: %w", name, err))
-				res.Failed = append(res.Failed, name)
+				a.logf("warning: %s (unchanged) is not running: %v", name, err)
+				res.Down = append(res.Down, name)
 				continue
 			}
 			res.Unchanged = append(res.Unchanged, name)
@@ -222,6 +241,14 @@ func (a *Activator) Activate(ctx context.Context, profileDir string) (*Result, e
 		} else {
 			res.Started = append(res.Started, name)
 		}
+	}
+	for _, unit := range stopLater {
+		a.logf("stopping removed unit %s", unit)
+		a.warn(a.Systemd.Stop(unit))
+		if err := os.Remove(filepath.Join(a.UnitDir, unit)); err != nil {
+			errs = append(errs, err)
+		}
+		relink = true
 	}
 	if relink {
 		a.warn(a.Systemd.DaemonReload())

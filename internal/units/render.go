@@ -54,6 +54,8 @@ type Options struct {
 	// host upgrades don't change every unit).
 	Exec       string
 	SecretsDir string
+	// DefaultResources apply to apps that don't set their own limits.
+	DefaultResources Resources
 }
 
 type Rendered struct {
@@ -110,7 +112,16 @@ func (u *unit) hardening(overrides map[string]any, extra ...[2]string) {
 	for _, kv := range slices.Concat(baseHardening, extra) {
 		v := kv[1]
 		if o, ok := overrides[kv[0]]; ok {
-			v = settingValue(o)
+			switch kv[0] {
+			case "RestrictAddressFamilies":
+				v += " " + settingValue(o) // additive
+			case "SystemCallFilter":
+				// A second allow-list line is merged with the first.
+				u.set(kv[0], v)
+				v = settingValue(o)
+			default:
+				v = settingValue(o)
+			}
 		}
 		u.set(kv[0], v)
 	}
@@ -192,7 +203,9 @@ func renderApp(name string, app App, dbUnits []string, o Options) string {
 	u.set("Description", "coolix app "+name+" (%i)")
 	u.set("After", strings.Join(append([]string{"network.target"}, dbUnits...), " "))
 	if len(dbUnits) > 0 {
-		u.set("Requires", strings.Join(dbUnits, " "))
+		// Wants, not Requires: restarting or removing a database must not
+		// restart or stop a serving slot behind the blue/green switch.
+		u.set("Wants", strings.Join(dbUnits, " "))
 	}
 
 	u.sect("Service")
@@ -230,6 +243,12 @@ func renderApp(name string, app App, dbUnits []string, o Options) string {
 	wrap := fmt.Sprintf("%s exec-app --slot %%i --port-base %d -- ", o.Exec, app.PortBase)
 	if app.PreStart != "" {
 		u.set("ExecStartPre", wrap+app.PreStart)
+		timeout := app.PreStartTimeout
+		if timeout == "" {
+			timeout = "15m"
+		}
+		// ExecStartPre counts against the start timeout (90s by default).
+		u.set("TimeoutStartSec", timeout)
 	}
 	u.set("ExecStart", wrap+app.Exe)
 	u.set("Restart", "on-failure")
@@ -240,15 +259,30 @@ func renderApp(name string, app App, dbUnits []string, o Options) string {
 	if app.Secrets {
 		u.set("LoadCredentialEncrypted", "env:"+o.SecretsDir+"/"+name+".cred")
 	}
-	if app.Resources.MemoryMax != "" {
-		u.set("MemoryMax", app.Resources.MemoryMax)
+	res := app.Resources
+	if res.MemoryMax == "" {
+		res.MemoryMax = o.DefaultResources.MemoryMax
 	}
-	if app.Resources.CPUQuota != "" {
-		u.set("CPUQuota", app.Resources.CPUQuota)
+	if res.CPUQuota == "" {
+		res.CPUQuota = o.DefaultResources.CPUQuota
 	}
-	if app.Resources.TasksMax > 0 {
-		u.set("TasksMax", strconv.Itoa(app.Resources.TasksMax))
+	if res.TasksMax == 0 {
+		res.TasksMax = o.DefaultResources.TasksMax
 	}
+	if res.MemoryMax != "" {
+		u.set("MemoryMax", res.MemoryMax)
+	}
+	if res.CPUQuota != "" {
+		u.set("CPUQuota", res.CPUQuota)
+	}
+	if res.TasksMax > 0 {
+		u.set("TasksMax", strconv.Itoa(res.TasksMax))
+	}
+	// An app may only listen on its own two ports, so it can't squat
+	// another app's idle slot (or the UI) and answer its health checks.
+	u.set("SocketBindAllow", fmt.Sprintf("tcp:%d", app.PortBase))
+	u.set("SocketBindAllow", fmt.Sprintf("tcp:%d", app.PortBase+1))
+	u.set("SocketBindDeny", "any")
 	return u.b.String()
 }
 
@@ -261,6 +295,9 @@ func dbService(u *unit, name, kind string) {
 	u.set("RuntimeDirectory", dir)
 	u.set("RuntimeDirectoryMode", "0700")
 	u.set("SyslogIdentifier", "coolix-"+name+"-"+kind)
+	// Unix sockets only.
+	u.set("PrivateNetwork", "yes")
+	u.set("SocketBindDeny", "any")
 	u.set("Restart", "on-failure")
 	u.set("Type", "notify")
 }
@@ -298,6 +335,9 @@ func dbJob(u *unit, name string) {
 	// themselves stay 0600.
 	u.set("StateDirectory", "coolix-backups/"+name)
 	u.set("StateDirectoryMode", "0755")
+	u.set("PrivateNetwork", "yes")
+	u.set("SocketBindDeny", "any")
+	u.set("TimeoutStartSec", "6h")
 }
 
 func renderBackup(name string, pg Database, keep int, o Options) string {
@@ -316,6 +356,8 @@ func renderRestore(name string, pg Database, o Options) string {
 	u.set("Description", "coolix postgres restore for "+name+" (%i)")
 	dbJob(u, name)
 	u.set("SyslogIdentifier", "coolix-"+name+"-restore")
+	// Don't wait forever for locks the running app holds.
+	u.set("Environment", QuoteEnv("PGOPTIONS", "-c lock_timeout=60000"))
 	u.set("ExecStart", fmt.Sprintf("%s db-restore %s %s %%S/coolix-backups/%s/%%i", o.Exec, pg.Package, DBSocketDir(name, "postgres"), name))
 	return u.b.String()
 }

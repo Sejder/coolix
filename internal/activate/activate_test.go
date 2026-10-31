@@ -243,3 +243,41 @@ func TestPrunesOldRenders(t *testing.T) {
 		t.Fatalf("want 1 rendered dir, got %d", len(entries))
 	}
 }
+
+func TestBrokenUnchangedAppDoesNotFailDeploy(t *testing.T) {
+	ctx := context.Background()
+	a, sd, _ := newActivator(t)
+	if _, err := a.Activate(ctx, mkProfile(t, map[string]string{"api": "v1", "blog": "v1"})); err != nil {
+		t.Fatal(err)
+	}
+	sd.active["coolix-app-api@blue.service"] = false // crashed
+	a.Health = func(_ context.Context, port int, _ string) error {
+		if port == 20000 || port == 20001 { // api
+			return errors.New("connection refused")
+		}
+		return nil
+	}
+	res, err := a.Activate(ctx, mkProfile(t, map[string]string{"api": "v1", "blog": "v2"}))
+	if err != nil {
+		t.Fatalf("deploy of blog failed because api was down: %v", err)
+	}
+	if !reflect.DeepEqual(res.Down, []string{"api"}) || !reflect.DeepEqual(res.Switched, []string{"blog"}) {
+		t.Fatalf("%+v", res)
+	}
+}
+
+func TestRemovedDatabaseStopsAfterSwitch(t *testing.T) {
+	ctx := context.Background()
+	a, sd, _ := newActivator(t)
+	if _, err := a.Activate(ctx, mkProfile(t, map[string]string{"blog": "v1"}, "blog")); err != nil {
+		t.Fatal(err)
+	}
+	sd.calls = nil
+	if _, err := a.Activate(ctx, mkProfile(t, map[string]string{"blog": "v1"})); err != nil {
+		t.Fatal(err)
+	}
+	stop, start := indexOf(sd.calls, "stop coolix-db-blog-postgres.service"), indexOf(sd.calls, "restart coolix-app-blog@green.service")
+	if stop < 0 || start < 0 || stop < start {
+		t.Fatalf("database must stop after the new slot started: %v", sd.calls)
+	}
+}

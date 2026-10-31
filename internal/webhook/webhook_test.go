@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
+	"net/url"
 	"testing"
 )
 
@@ -60,5 +61,23 @@ func TestMatches(t *testing.T) {
 	d := &Delivery{Ref: "refs/heads/main"}
 	if !d.Matches("") || !d.Matches("main") || d.Matches("prod") {
 		t.Error("branch filter")
+	}
+}
+
+func TestFormPayloadAndUnknownRef(t *testing.T) {
+	body := "payload=" + url.QueryEscape(`{"ref":"refs/heads/dev"}`)
+	h := http.Header{}
+	h.Set("Content-Type", "application/x-www-form-urlencoded")
+	h.Set("X-GitHub-Event", "push")
+	h.Set("X-Hub-Signature-256", "sha256="+sign(body))
+	d, err := Verify(h, []byte(body), token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Ref != "refs/heads/dev" || d.Matches("main") {
+		t.Fatalf("form payload: %+v", d)
+	}
+	if (&Delivery{}).Matches("main") {
+		t.Fatal("unknown ref must not match a branch filter")
 	}
 }

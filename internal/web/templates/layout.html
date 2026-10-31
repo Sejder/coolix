@@ -4,18 +4,24 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{.Title}} · coolix</title>
+  <script src="/static/theme.js"></script>
   <link rel="stylesheet" href="/static/style.css">
   <link rel="icon" href="/static/logo.svg">
+  <!-- htmx: no eval, no injected styles (strict CSP); 4xx pages (form errors) are swapped in too. -->
+  <meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false,"selfRequestsOnly":true,"historyCacheSize":0,"responseHandling":[{"code":"204","swap":false},{"code":"...","swap":true}]}'>
+  <script src="/static/vendor/htmx.min.js" defer></script>
   <script src="/static/app.js" defer></script>
 </head>
-<body class="page-{{.Page}}">
+<body class="page-{{.Page}}" hx-boost="true">
   {{if .Authed}}
   <header class="topbar">
     <a class="brand" href="/"><img src="/static/logo.svg" alt="" width="22" height="22"> coolix</a>
     <nav>
       <a href="/" {{if or (eq .Page "dashboard") (eq .Page "app") (eq .Page "new")}}class="active"{{end}}>Apps</a>
       <a href="/generations" {{if eq .Page "generations"}}class="active"{{end}}>Generations</a>
+      <a href="/account" {{if eq .Page "account"}}class="active"{{end}}>Account</a>
     </nav>
+    <button class="link theme-toggle" type="button" data-theme-toggle title="Theme">Theme</button>
     <form method="post" action="/logout"><button class="link">Sign out</button></form>
   </header>
   {{end}}

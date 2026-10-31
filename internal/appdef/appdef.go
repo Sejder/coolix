@@ -57,8 +57,10 @@ type App struct {
 	Command string `toml:"command,omitempty"`
 	// PreStart runs (from the package, with the app's environment) before
 	// every start of a slot, e.g. database migrations. Must be idempotent.
-	PreStart string   `toml:"pre_start,omitempty"`
-	Domains  []string `toml:"domains,omitempty"`
+	PreStart string `toml:"pre_start,omitempty"`
+	// PreStartTimeout bounds PreStart (default 15m).
+	PreStartTimeout string   `toml:"pre_start_timeout,omitempty"`
+	Domains         []string `toml:"domains,omitempty"`
 	// PortBase is the blue slot's port; green uses PortBase+1.
 	PortBase      int   `toml:"port_base"`
 	FollowNixpkgs *bool `toml:"follow_nixpkgs,omitempty"`
@@ -107,7 +109,14 @@ var (
 )
 
 func validCommand(c string) bool {
-	return commandRe.MatchString(c) && !strings.HasPrefix(c, "/") && !strings.Contains(c, "..")
+	return commandRe.MatchString(c) && units.CleanRelative(c) && !strings.Contains(c, "..")
+}
+
+// Normalize drops settings that no longer apply: backups need postgres.
+func (a *App) Normalize() {
+	if !a.HasDatabase("postgres") {
+		a.Backup = nil
+	}
 }
 
 // Validate checks everything that ends up interpolated into flake.nix or the
@@ -116,7 +125,7 @@ func validCommand(c string) bool {
 func (a *App) Validate() error {
 	var errs []error
 	if !units.ValidName(a.Name) {
-		errs = append(errs, fmt.Errorf("name %q: must be 2-32 chars of a-z, 0-9 and -, starting with a letter", a.Name))
+		errs = append(errs, fmt.Errorf("name %q: must be 2-20 chars of a-z, 0-9 and -, starting with a letter", a.Name))
 	}
 	if a.Source == "" {
 		errs = append(errs, errors.New("source: required (a flake reference, e.g. github:me/app)"))
@@ -131,6 +140,9 @@ func (a *App) Validate() error {
 	}
 	if a.PreStart != "" && !validCommand(a.PreStart) {
 		errs = append(errs, fmt.Errorf("pre_start %q: must be a relative path inside the package, e.g. bin/migrate", a.PreStart))
+	}
+	if err := units.CheckPreStartTimeout(a.PreStartTimeout); err != nil {
+		errs = append(errs, err)
 	}
 	for _, d := range a.Domains {
 		if !units.ValidDomain(d) {

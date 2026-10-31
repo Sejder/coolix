@@ -7,7 +7,7 @@
                          \                  /
                           coolix user: edits the apps repo, runs nix builds
                                     |
-                 systemctl start coolix-activate@<profile>.service  (polkit)
+            /run/coolix/control.sock → coolix-control@ (root, fixed requests)
                                     |
               root: validate the profile, render units, apply secrets, activate
                                     |
@@ -35,19 +35,20 @@ differs.
 ## Deploying
 
 1. `nix flake lock` (and `nix flake update app-<name>` when deploying a single
-   app) pins the sources; the result is committed.
+   app) pins the sources, in a private clone of the repo so edits in the UI
+   aren't blocked while inputs are fetched; the result is committed.
 2. `nix build` of the committed revision builds an **app profile**: an
    `apps.json` manifest with each app's store paths (its program, database
    servers, runtime packages) and settings. It contains no unit files. The
    build runs as the unprivileged `coolix` user through the nix daemon.
-3. The `coolix` user asks systemd to start
-   `coolix-activate@<store-path>.service`. Polkit allows this unit pattern and
-   nothing else. As root, it:
+3. The `coolix` user sends `activate <store path>` to
+   `/run/coolix/control.sock` (group `coolix`). A root `coolix-control@`
+   instance handles the request and streams its output back:
    - validates the store path and **every field of the manifest** against a
      fixed policy (see [Security model](#security-model)), and refuses the
      profile if anything is off,
-   - makes it a new generation of `/nix/var/nix/profiles/coolix/apps`,
    - encrypts pending secret changes into `/var/lib/coolix-secrets`,
+   - makes it a new generation of `/nix/var/nix/profiles/coolix/apps`,
    - renders the units itself into `/run/coolix/units` and links them into
      `/run/systemd/system` (outside NixOS's control, so `nixos-rebuild` never
      touches apps; a boot service re-renders them),
@@ -66,10 +67,19 @@ activator:
 4. waits the drain time, then stops the old slot.
 
 If the health check fails, the new slot is stopped, the app's previous unit
-file is linked back in, and the whole previous generation is re-activated. The
-running state then matches a generation again. Because systemd keeps running
-processes on the unit definition they started with, swapping the template file
-under a running slot is safe.
+file is linked back in, the previous generation is re-activated and the failed
+one deleted. The running state then matches a generation again. Because systemd
+keeps running processes on the unit definition they started with, swapping the
+template file under a running slot is safe. App slots only `Wants=` their
+databases, so restarting a changed database doesn't restart the serving slot,
+and a removed database is stopped only after the new slot is up. An app that
+wasn't changed but is down (e.g. crash-looping) is reported, but doesn't fail
+the deploy of other apps.
+
+At boot, `coolix-activate-boot` re-renders the current generation. Apps that
+no longer pass the policy (say, after narrowing `portRange`) are skipped with a
+warning; a profile built by an older coolix is left alone until the next
+`coolix deploy`.
 
 ## Rollback
 
@@ -107,8 +117,8 @@ Every app with PostgreSQL gets `coolix-backup-<app>.service`, which runs
 `pg_dump` as the app's user into `/var/lib/private/coolix-backups/<app>` and
 keeps the newest `backup.keep` dumps (default 7). With `backup.schedule` set, a
 `coolix-backup-<app>.timer` runs it on that schedule (`Persistent=true`, so a
-missed run happens after boot). `coolix db backup`/the UI start it on demand.
-`coolix db restore` starts `coolix-restore-<app>@<dump>.service`, which runs
+missed run happens after boot). `coolix db backup` and the UI ask coolix-control to start it on demand.
+`coolix db restore` has it start `coolix-restore-<app>@<dump>.service`, which runs
 `pg_restore --clean --single-transaction` into the live database. Dumps are
 only readable by the app's user and root. Copy them off the host yourself
 (e.g. with restic or borg): a backup on the same disk doesn't protect against
@@ -118,7 +128,7 @@ losing the disk.
 
 `POST /hooks/<app>` on the UI deploys the app (like `coolix deploy <app>`)
 when a forge reports a push. Each app has its own random token, stored in
-`/var/lib/coolix/webhooks/<app>.token` (not in git), and the request must be
+`<stateDir>/webhooks/<app>.token` (not in git), and the request must be
 signed with it: an HMAC-SHA256 signature for GitHub (`X-Hub-Signature-256`),
 Gitea and Forgejo, the token itself for GitLab (`X-Gitlab-Token`), or
 `Authorization: Bearer <token>` for anything else. Pings are answered, other
@@ -131,42 +141,59 @@ There are three levels of trust:
 
 | Who | Can |
 |---|---|
-| root (`coolix-activate@`) | everything; runs only coolix's own code, and only on validated data |
-| the `coolix` user (the web UI, `sudo coolix …`) | edit the apps repo, build, deploy any code *into an app's sandbox*, start/stop apps, back up and restore their databases, set secrets it can't read back |
-| an app | its own state directory, databases, secrets and ports |
+| root (`coolix-control@`, `coolix-activate-boot`) | everything; runs only coolix's own code, and only on validated data |
+| the `coolix` user (the web UI, `sudo coolix …`) | edit the apps repo, build, deploy any code *into an app's sandbox*, ask root to activate a profile and to back up or restore an app's database, set secrets it can't read back |
+| an app | its own state directory, databases, secrets and two ports |
 
 What keeps the `coolix` user, and so a compromised UI or a stolen admin
-password, from becoming root:
+login, from becoming root:
 
-- **Root renders every unit.** The profile is data only. Root checks every
-  field before anything happens: names, ports (in the configured range, no
-  clashes), domains (valid hostnames, unique, not the UI's), store paths,
-  environment names and values, resource limits, calendar expressions, and
-  hardening overrides. Then it generates the unit files itself. A hand-built
-  "profile" that asks for anything else is refused before it becomes a
-  generation.
+- **One narrow door to root.** The coolix user has no polkit rights. It
+  reaches root only through `/run/coolix/control.sock` (owned by root, group
+  `coolix`), which accepts exactly `activate <profile>`, `backup <app>` and
+  `restore <app> <dump>`, each validated. (A polkit rule can't be this
+  narrow: systemd asks polkit the same question for "start this unit" and
+  "create a transient unit with this name and run anything in it".)
+- **Root renders every unit.** The profile is data only. Root opens it
+  without following symlinks and checks every field before anything happens:
+  names, ports (in the configured range, no clashes), domains (fully
+  qualified, unique, not the UI's or any other Caddy site of the host), store
+  paths, environment names and values, resource limits, calendar expressions,
+  and hardening overrides. Then it generates the unit files itself. A
+  hand-built "profile" that asks for anything else is refused before it
+  becomes a generation.
 - **The sandbox is fixed.** Every app and database unit runs with
   `DynamicUser`, `NoNewPrivileges`, an empty capability set,
   `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `PrivateDevices`,
   `ProtectProc=invisible`, `RestrictSUIDSGID`, a `@system-service` syscall
-  filter and more. `[hardening]` in `app.toml` may only relax a short list of
-  settings that don't grant privileges (see the app.toml reference).
-  `override.nix`, which allowed arbitrary unit settings, is gone.
-- **Polkit allows exactly three kinds of units** to be started by the coolix
-  user: `coolix-activate@<profile>`, `coolix-backup-<app>` and
-  `coolix-restore-<app>@<dump>`. Each one validates its argument.
-- **No journal access.** The coolix user isn't in `systemd-journal`. App logs,
-  the output of activations and backups, and backup listings come from
-  `coolix-query`: a socket-activated service (`/run/coolix/query.sock`, group
-  `coolix`) that runs as a throwaway dynamic user, answers a fixed set of
-  questions about coolix units only, and can't write anything.
-- **Root never follows the coolix user's files.** Pending secrets are read
-  with `O_NOFOLLOW` from a directory opened without following symlinks, size-
-  and name-checked.
-- The web UI runs as `coolix`, not root. It has a single admin password (read
-  through `LoadCredential`), HMAC-signed `SameSite=Strict` session cookies,
-  Origin checks on every POST, and a strict Content-Security-Policy.
+  filter and more. `[hardening]` in `app.toml` may only relax settings the host
+  allows (`services.coolix.apps.allowedHardeningOverrides`), none of which
+  grant privileges; syscall and address-family settings can only add to the
+  defaults. `override.nix`, which allowed arbitrary unit settings, is gone.
+- **Apps can't hijack each other's traffic.** An app may only listen on its
+  own two ports (`SocketBindAllow`), so it can't squat another app's idle
+  slot or the UI's port and answer their health checks. Databases and backup
+  jobs have no network at all. Caddy's admin API, which could reroute every
+  domain, is on a unix socket only Caddy can open, not on `localhost:2019`.
+- **No journal access.** The coolix user isn't in `systemd-journal`. App logs
+  and backup listings come from `coolix-query`: a socket-activated service
+  (`/run/coolix/query.sock`, group `coolix`) that runs as a throwaway dynamic
+  user, answers a fixed set of questions about coolix units only, and can't
+  write anything.
+- **Root never follows the coolix user's files.** Pending secrets and the
+  profile manifest are read with `O_NOFOLLOW`, size- and type-checked.
+- **The web UI** runs as `coolix`, not root. Sign-in is by passkey or
+  password (argon2id), rate limited per client and to about one guess per
+  second overall. Sessions are HMAC-signed `SameSite=Strict` cookies that are
+  revoked on sign-out, password changes and passkey removal. Every POST is
+  Origin-checked and there's a strict Content-Security-Policy. A fresh
+  install can only be claimed with a one-time code from
+  `sudo coolix setup-code`, so whoever finds the URL first can't take it.
 
 The coolix user can still run arbitrary code as *any app* (that's what
 deploying is) and so read that app's secrets and data. Treat the admin
-password as access to all apps, not to the host.
+account as access to all apps, not to the host.
+
+Apps share the host's network namespace, so they can connect to each
+other's ports directly (not only through Caddy). Don't rely on network
+isolation between apps; authenticate what they expose.

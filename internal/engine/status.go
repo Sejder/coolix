@@ -27,6 +27,9 @@ type Status struct {
 	HeadRev    string
 	// UpToDate is true when the running profile matches the repo.
 	UpToDate bool
+	// OldProfile is true when the current profile was built by an older
+	// coolix and needs a redeploy.
+	OldProfile bool
 }
 
 func slotOf(app string) string {
@@ -40,11 +43,12 @@ func slotOf(app string) string {
 
 func (e *Engine) Status() (*Status, error) {
 	st := &Status{}
-	m, _ := units.ReadManifest(e.Profile)
+	m, _ := units.ReadSummary(e.Profile)
 	if m == nil {
-		m = &units.Manifest{}
+		m = &units.Summary{}
 	}
 	st.RunningRev = m.Rev
+	st.OldProfile = m.Version > 0 && m.Version < units.ManifestVersion
 
 	apps, err := e.Apps()
 	if err != nil {

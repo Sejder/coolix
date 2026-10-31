@@ -22,6 +22,7 @@ func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
 type appFlags struct {
 	fs                              *flag.FlagSet
 	source, pkg, command, preStart  *string
+	preStartTimeout                 *string
 	healthPath, healthTimeout       *string
 	memoryMax, cpuQuota             *string
 	tasksMax, backupKeep            *int
@@ -36,6 +37,7 @@ func newAppFlags(name string) *appFlags {
 	f.pkg = f.fs.String("package", "", "package attribute (default: default)")
 	f.command = f.fs.String("command", "", "executable path inside the package (default: mainProgram)")
 	f.preStart = f.fs.String("pre-start", "", "executable inside the package to run before each start, e.g. bin/migrate")
+	f.preStartTimeout = f.fs.String("pre-start-timeout", "", "how long the pre-start command may run (default 15m)")
 	f.memoryMax = f.fs.String("memory-max", "", "memory limit, e.g. 512M (empty: none)")
 	f.cpuQuota = f.fs.String("cpu-quota", "", "CPU limit, e.g. 50% (empty: none)")
 	f.tasksMax = f.fs.Int("tasks-max", 0, "process/thread limit (0: default)")
@@ -66,6 +68,9 @@ func (f *appFlags) apply(app *appdef.App) error {
 	}
 	if set["pre-start"] {
 		app.PreStart = *f.preStart
+	}
+	if set["pre-start-timeout"] {
+		app.PreStartTimeout = *f.preStartTimeout
 	}
 	if set["path"] {
 		app.Path = nil
@@ -140,12 +145,22 @@ func (f *appFlags) apply(app *appdef.App) error {
 		delete(app.Env, k)
 	}
 	if set["db"] {
+		previous := app.Databases
 		app.Databases = nil
 		for _, d := range f.dbs {
 			if d == "none" {
 				continue
 			}
 			kind, version, _ := strings.Cut(d, ":")
+			// Keep a configured version unless a new one is given: silently
+			// moving an existing data directory to another major breaks it.
+			if version == "" {
+				for _, old := range previous {
+					if old.Kind == kind {
+						version = old.Version
+					}
+				}
+			}
 			app.Databases = append(app.Databases, appdef.Database{Kind: kind, Version: version})
 		}
 	}
@@ -193,14 +208,7 @@ func runApp(e *engine.Engine, args []string) error {
 			logf("added %s on ports %d/%d; run `coolix deploy %s` to start it", name, app.PortBase, app.PortBase+1, name)
 			return nil
 		}
-		app, err := e.App(name)
-		if err != nil {
-			return err
-		}
-		if err := f.apply(app); err != nil {
-			return err
-		}
-		if err := e.UpdateApp(app); err != nil {
+		if _, err := e.ModifyApp(name, f.apply); err != nil {
 			return err
 		}
 		logf("updated %s; run `coolix deploy %s` to apply", name, name)

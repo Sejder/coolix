@@ -31,6 +31,9 @@
       <input name="path" value="{{join .Path " "}}" placeholder="ffmpeg imagemagick" spellcheck="false"></label>
   </div>
   <div class="row three">
+    <label>Pre-start timeout <small>default 15m</small><input name="pre_start_timeout" value="{{.PreStartTimeout}}" placeholder="15m" spellcheck="false"></label>
+  </div>
+  <div class="row three">
     <label>Memory limit<input name="memory_max" value="{{with .Resources}}{{.MemoryMax}}{{end}}" placeholder="512M" spellcheck="false"></label>
     <label>CPU limit<input name="cpu_quota" value="{{with .Resources}}{{.CPUQuota}}{{end}}" placeholder="100%" spellcheck="false"></label>
     <label>Task limit<input name="tasks_max" value="{{with .Resources}}{{if .TasksMax}}{{.TasksMax}}{{end}}{{end}}" placeholder="512" inputmode="numeric"></label>

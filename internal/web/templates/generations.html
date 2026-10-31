@@ -15,7 +15,7 @@
     <td>{{ago .Time}} <span class="muted small">{{.Time.Format "2006-01-02 15:04"}}</span></td>
     <td><code>{{shortRev .Rev}}</code></td>
     <td>{{join .Apps ", "}}</td>
-    <td class="right">{{if .Current}}<span class="pill live"><i></i>current</span>{{else}}<form method="post" action="/generations/{{.Number}}/rollback" data-confirm="Roll back to generation {{.Number}}?"><button class="small">Roll back</button></form>{{end}}</td>
+    <td class="right">{{if .Current}}<span class="pill live"><i></i>current</span>{{else}}<form method="post" action="/generations/{{.Number}}/rollback" hx-confirm="Roll back to generation {{.Number}}?"><button class="small">Roll back</button></form>{{end}}</td>
   </tr>
   {{else}}
   <tr><td colspan="5" class="empty">No generations yet.</td></tr>

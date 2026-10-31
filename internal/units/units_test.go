@@ -10,7 +10,7 @@ const (
 	pg  = "/nix/store/1jzvzdyhmwjm2xdw2iak5p5x8qj2pkgr-postgresql-18.1"
 )
 
-var policy = Policy{PortMin: 20000, PortMax: 29999, ReservedDomains: []string{"coolix.example.com"}}
+var policy = Policy{PortMin: 20000, PortMax: 29999, ReservedDomains: []string{"coolix.example.com", "*.internal.example.com"}}
 
 func manifest() *Manifest {
 	return &Manifest{Version: ManifestVersion, Apps: map[string]App{
@@ -61,6 +61,14 @@ func TestPolicyRejects(t *testing.T) {
 		"memory injection":    func(a *App) { a.Resources.MemoryMax = "1G\nUser=root" },
 		"backup schedule":     func(a *App) { a.Backup.Schedule = "daily\nOnBootSec=1" },
 		"backup without pg":   func(a *App) { a.Databases = nil },
+		"reserved wildcard":   func(a *App) { a.Domains = []string{"x.internal.example.com"} },
+		"single label":        func(a *App) { a.Domains = []string{"localhost"} },
+		"ip literal":          func(a *App) { a.Domains = []string{"127.0.0.1"} },
+		"trailing dot":        func(a *App) { a.Domains = []string{"blog.example.com."} },
+		"not allowed here":    func(a *App) { a.Hardening = map[string]any{"RestrictNamespaces": false} },
+		"syscall deny list":   func(a *App) { a.Hardening = map[string]any{"SystemCallFilter": "~@mount"} },
+		"family deny list":    func(a *App) { a.Hardening = map[string]any{"RestrictAddressFamilies": "~AF_INET"} },
+		"pre_start forever":   func(a *App) { a.PreStartTimeout = "3h" },
 	}
 	for name, mutate := range cases {
 		m := manifest()
@@ -100,7 +108,8 @@ func TestRender(t *testing.T) {
 		`Environment="DATABASE_URL=postgresql:///app?host=/run/coolix-db/blog-postgres"` + "\n",
 		`Environment="LOG_LEVEL=info"` + "\n",
 		"LoadCredentialEncrypted=env:/var/lib/coolix-secrets/blog.cred\n",
-		"Requires=coolix-db-blog-postgres.service\n",
+		"Wants=coolix-db-blog-postgres.service\n",
+		"SocketBindAllow=tcp:20000\n", "SocketBindAllow=tcp:20001\n", "SocketBindDeny=any\n",
 		"MemoryMax=512M\n", "CPUQuota=50%\n", "TasksMax=64\n",
 	} {
 		if !strings.Contains(app, want) {
@@ -139,6 +148,73 @@ func TestQuoteEnv(t *testing.T) {
 	for in, want := range cases {
 		if got := QuoteEnv("K", in); got != want {
 			t.Errorf("QuoteEnv(%q) = %s, want %s", in, got, want)
+		}
+	}
+}
+
+func TestLongNamesRejected(t *testing.T) {
+	m := manifest()
+	m.Apps["a-twenty-one-chars-xx"] = m.Apps["blog"]
+	delete(m.Apps, "blog")
+	if policy.Validate(m) == nil {
+		t.Fatal("21-char app name accepted (DynamicUser names are capped at 31 chars)")
+	}
+}
+
+func TestAdditiveHardening(t *testing.T) {
+	m := manifest()
+	a := m.Apps["blog"]
+	a.Hardening = map[string]any{"SystemCallFilter": "@pkey", "RestrictAddressFamilies": "AF_NETLINK"}
+	m.Apps["blog"] = a
+	if err := policy.Validate(m); err != nil {
+		t.Fatal(err)
+	}
+	unit := Render(m, Options{Exec: "/x"}).Files["coolix-app-blog@.service"]
+	for _, want := range []string{
+		"SystemCallFilter=@system-service\nSystemCallFilter=@pkey\n",
+		"RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK\n",
+	} {
+		if !strings.Contains(unit, want) {
+			t.Errorf("want %q in\n%s", want, unit)
+		}
+	}
+	// The host can allow more.
+	a.Hardening = map[string]any{"RestrictNamespaces": false}
+	m.Apps["blog"] = a
+	p := policy
+	p.AllowedHardening = append([]string{"RestrictNamespaces"}, DefaultAllowedHardening...)
+	if err := p.Validate(m); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateAppsBlamesOneApp(t *testing.T) {
+	m := manifest()
+	bad := m.Apps["blog"]
+	bad.Exe = "/bin/sh"
+	m.Apps["evil"] = bad
+	errs := policy.ValidateApps(m)
+	if len(errs) != 1 || errs["evil"] == nil {
+		t.Fatalf("got %v", errs)
+	}
+}
+
+func TestDefaultResources(t *testing.T) {
+	m := manifest()
+	a := m.Apps["blog"]
+	a.Resources = Resources{}
+	m.Apps["blog"] = a
+	unit := Render(m, Options{Exec: "/x", DefaultResources: Resources{TasksMax: 1024, MemoryMax: "1G"}}).Files["coolix-app-blog@.service"]
+	if !strings.Contains(unit, "TasksMax=1024\n") || !strings.Contains(unit, "MemoryMax=1G\n") {
+		t.Fatalf("defaults not applied:\n%s", unit)
+	}
+}
+
+func TestDatabasesHaveNoNetwork(t *testing.T) {
+	r := Render(manifest(), Options{Exec: "/x"})
+	for _, u := range []string{"coolix-db-blog-postgres.service", "coolix-backup-blog.service", "coolix-restore-blog@.service"} {
+		if !strings.Contains(r.Files[u], "PrivateNetwork=yes\n") {
+			t.Errorf("%s has network access:\n%s", u, r.Files[u])
 		}
 	}
 }

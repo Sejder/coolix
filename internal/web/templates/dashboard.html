@@ -7,9 +7,12 @@
   </div>
 </div>
 
+<div id="live" hx-get="/" hx-select="#live" hx-trigger="every 5s" hx-swap="outerHTML">
 {{with .Status}}
 {{if not .RunningRev}}
   <div class="banner">Nothing deployed yet. Add an app and deploy it.</div>
+{{else if .OldProfile}}
+  <div class="banner warn">The running profile was built by an older coolix and won't start at boot. Deploy to rebuild it.</div>
 {{else if .UpToDate}}
   <div class="banner ok">Running <code>{{shortRev .RunningRev}}</code>. Everything is deployed.</div>
 {{else}}
@@ -38,4 +41,5 @@
 
 <h2>Recent deploys</h2>
 <div class="card flush">{{template "jobs" .Jobs}}</div>
+</div>
 {{end}}

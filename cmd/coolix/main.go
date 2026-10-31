@@ -2,8 +2,9 @@
 // the app profile with Nix and activates it.
 //
 // Privileges: repo edits and builds run as the unprivileged coolix user (root
-// invocations drop to it). Only activation runs as root, inside the
-// coolix-activate@<profile>.service unit, which polkit lets the coolix user start.
+// invocations drop to it). Activation and database backups/restores run as
+// root in coolix-control@ instances, which the coolix user reaches through
+// /run/coolix/control.sock; root validates every request and profile.
 package main
 
 import (
@@ -18,6 +19,7 @@ import (
 	"syscall"
 	"text/tabwriter"
 
+	"coolix/internal/control"
 	"coolix/internal/engine"
 )
 
@@ -47,10 +49,13 @@ commands:
   webhook show APP             print the webhook URL path and token
   webhook disable APP          turn the app's webhook off
   serve                        run the web UI
+  setup-code                   print a one-time code to create the UI's admin account
+  account reset                remove the admin's password and passkeys (then use setup-code)
 
 internal (run by systemd):
   activate                     re-activate the current profile (root, at boot)
-  activate-store NAME          make /nix/store/NAME the current profile and activate it (root)
+  control-serve                answer one coolix-control connection (root): activate a
+                               profile, back up or restore a database
   exec-app, db-init, db-createdb, db-backup, db-restore
                                helpers inside app and database units (app user)
   query-serve                  answer one coolix-query connection
@@ -80,7 +85,7 @@ func run(ctx context.Context, args []string) error {
 		return err
 	}
 	switch args[0] {
-	case "activate", "activate-store", "help", "-h", "--help":
+	case "activate", "control-serve", "help", "-h", "--help":
 	default:
 		if err := dropPrivileges(c); err != nil {
 			return err
@@ -122,15 +127,22 @@ func run(ctx context.Context, args []string) error {
 			}
 		}
 		return e.Rollback(ctx, n)
+	case "setup-code":
+		return runSetupCode(e)
+	case "account":
+		return runAccount(e, args[1:])
 	case "serve":
 		return runServe(ctx, e)
 	case "activate":
-		return e.Activate(ctx, c.Profile, nil)
-	case "activate-store":
-		if len(args) != 2 {
-			return errors.New("usage: coolix activate-store NAME")
+		return e.ActivateBoot(ctx)
+	case "control-serve":
+		if os.Geteuid() != 0 {
+			return errors.New("control-serve must run as root")
 		}
-		return e.ActivateStore(ctx, args[1])
+		// One connection on stdin/stdout (coolix-control@); the journal
+		// (stderr) keeps an audit trail. Not cancelled when the client
+		// goes away: a half-done activation is worse than an unwatched one.
+		return control.Serve(context.WithoutCancel(ctx), os.Stdin, os.Stdout, os.Stderr, e.HandleControl)
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return nil
@@ -179,6 +191,8 @@ func runStatus(e *engine.Engine) error {
 		return err
 	}
 	switch {
+	case st.OldProfile:
+		fmt.Println("\nthe running profile was built by an older coolix and won't start at boot: run `coolix deploy`")
 	case st.RunningRev == "":
 		fmt.Println("\nnothing deployed yet")
 	case !st.UpToDate:

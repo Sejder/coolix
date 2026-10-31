@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"coolix/internal/appdef"
 	"coolix/internal/engine"
@@ -64,7 +65,7 @@ func TestAuthAndPages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(body(t, resp), "Admin password") {
+	if !strings.Contains(body(t, resp), "Sign in") {
 		t.Fatal("unauthenticated request not sent to login")
 	}
 
@@ -153,13 +154,13 @@ func TestWebhookAuth(t *testing.T) {
 		resp.Body.Close()
 		return resp.StatusCode
 	}
-	if got := post("nope", nil); got != 404 {
+	if got := post("nope", nil); got != 401 {
 		t.Errorf("unknown app: %d", got)
 	}
 	if err := e.CreateApp(&appdef.App{Name: "blog", Source: "github:me/blog"}); err != nil {
 		t.Fatal(err)
 	}
-	if got := post("blog", map[string]string{"Authorization": "Bearer x"}); got != 404 {
+	if got := post("blog", map[string]string{"Authorization": "Bearer x"}); got != 401 {
 		t.Errorf("webhook off: %d", got)
 	}
 	token, err := e.EnableWebhook("blog")
@@ -180,5 +181,156 @@ func TestWebhookAuth(t *testing.T) {
 	}
 	if tok, _ := e.WebhookToken("blog"); tok != "" {
 		t.Error("token survived app removal")
+	}
+}
+
+func TestLogoutRevokesSessions(t *testing.T) {
+	srv, c := newTestServer(t)
+	resp, _ := c.PostForm(srv.URL+"/login", url.Values{"password": {"hunter2"}})
+	resp.Body.Close()
+	u, _ := url.Parse(srv.URL)
+	stolen := c.Jar.Cookies(u)
+	if len(stolen) == 0 {
+		t.Fatal("no session cookie")
+	}
+	resp, _ = c.PostForm(srv.URL+"/logout", nil)
+	resp.Body.Close()
+
+	// Replaying the old cookie must not work.
+	req, _ := http.NewRequest("GET", srv.URL+"/", nil)
+	req.AddCookie(stolen[0])
+	resp, err := (&http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("revoked session still valid: %d", resp.StatusCode)
+	}
+}
+
+func TestLoginLimiter(t *testing.T) {
+	var l loginLimiter
+	now := time.Now()
+	for range maxFailures {
+		if l.blocked("1.2.3.4", now) {
+			t.Fatal("blocked too early")
+		}
+		l.fail("1.2.3.4", now)
+	}
+	if !l.blocked("1.2.3.4", now) || l.blocked("5.6.7.8", now) {
+		t.Fatal("lockout must apply to the failing client only")
+	}
+	if l.blocked("1.2.3.4", now.Add(failureWindow+time.Second)) {
+		t.Fatal("lockout must expire")
+	}
+}
+
+func TestClientIP(t *testing.T) {
+	r := httptest.NewRequest("POST", "/login", nil)
+	r.RemoteAddr = "127.0.0.1:5555"
+	r.Header.Set("X-Forwarded-For", "6.6.6.6, 1.2.3.4")
+	if got := clientIP(r); got != "1.2.3.4" {
+		t.Fatalf("behind proxy: %s", got)
+	}
+	r.RemoteAddr = "9.9.9.9:5555"
+	if got := clientIP(r); got != "9.9.9.9" {
+		t.Fatalf("direct client may not spoof X-Forwarded-For: %s", got)
+	}
+}
+
+func newSetupServer(t *testing.T) (*httptest.Server, *http.Client, string) {
+	t.Helper()
+	dir := t.TempDir()
+	s := &Server{
+		Config:          &engine.Config{StateDir: dir, Nixpkgs: "/nix/store/a", Lib: "/nix/store/b", System: "x86_64-linux", Profile: filepath.Join(dir, "profile")},
+		SessionKey:      []byte("0123456789abcdef0123456789abcdef"),
+		WebAuthnOrigins: []string{"http://localhost:8090"},
+	}
+	h, err := s.Handler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	jar, _ := cookiejar.New(nil)
+	return srv, &http.Client{Jar: jar}, dir
+}
+
+func TestSetupFlow(t *testing.T) {
+	srv, c, dir := newSetupServer(t)
+	resp, _ := c.Get(srv.URL + "/")
+	if b := body(t, resp); !strings.Contains(b, "sudo coolix setup-code") {
+		t.Fatal("unclaimed install must show the setup page")
+	}
+	resp, _ = c.PostForm(srv.URL+"/setup", url.Values{"code": {"AAAA-BBBB-CCCC-DDDD"}})
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("no code generated yet, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	code, err := NewSetupCode(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, _ = c.PostForm(srv.URL+"/setup", url.Values{"code": {code}, "password": {"short"}, "confirm": {"short"}})
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("short password accepted: %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	pw := "correct horse battery"
+	resp, _ = c.PostForm(srv.URL+"/setup", url.Values{"code": {strings.ToLower(code)}, "password": {pw}, "confirm": {pw}})
+	if b := body(t, resp); !strings.Contains(b, "Account created") {
+		t.Fatalf("setup failed:\n%s", b)
+	}
+	// Claimed: the code is gone and setup is closed.
+	if checkSetupCode(dir, code) {
+		t.Fatal("setup code still valid after claiming")
+	}
+	other, _ := cookiejar.New(nil)
+	resp, _ = (&http.Client{Jar: other}).Get(srv.URL + "/setup")
+	if b := body(t, resp); strings.Contains(b, "setup-code") {
+		t.Fatal("setup page still offered after claiming")
+	}
+	// The password works; removing it is refused (it's the only credential).
+	c2 := &http.Client{Jar: other}
+	resp, _ = c2.PostForm(srv.URL+"/login", url.Values{"password": {pw}})
+	if b := body(t, resp); !strings.Contains(b, "Nothing deployed yet") {
+		t.Fatal("login with the account password failed")
+	}
+	resp, _ = c2.PostForm(srv.URL+"/account/password/delete", nil)
+	if b := body(t, resp); !strings.Contains(b, "only way left") {
+		t.Fatalf("last credential removed:\n%s", b)
+	}
+	// Changing the password signs out other sessions.
+	resp, _ = c2.PostForm(srv.URL+"/account/password", url.Values{"password": {pw + "2"}, "confirm": {pw + "2"}})
+	resp.Body.Close()
+	resp, _ = c.Get(srv.URL + "/account")
+	if b := body(t, resp); !strings.Contains(b, "Sign in") {
+		t.Fatal("other session survived a password change")
+	}
+}
+
+func TestPasswordHash(t *testing.T) {
+	h, err := HashPassword("correct horse battery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !VerifyPassword(h, "correct horse battery") || VerifyPassword(h, "correct horse batterY") || VerifyPassword("garbage", "x") {
+		t.Fatal("password verification")
+	}
+}
+
+func TestPasskeyEndpointsCheckOrigin(t *testing.T) {
+	srv, c, _ := newSetupServer(t)
+	req, _ := http.NewRequest("POST", srv.URL+"/login/passkey/begin", nil)
+	req.Header.Set("Origin", "https://evil.example.com")
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		t.Fatal("passkey ceremony started for a foreign origin")
 	}
 }

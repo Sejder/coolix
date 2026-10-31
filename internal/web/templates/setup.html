@@ -1,0 +1,19 @@
+{{define "content"}}
+<div class="login">
+  <img src="/static/logo.svg" alt="" width="56" height="56">
+  <h1>Set up coolix</h1>
+  <p class="muted">Create the admin account. To prove this server is yours, run this on it:</p>
+  <pre class="command"><code>sudo coolix setup-code</code></pre>
+  <form method="post" action="/setup" class="card">
+    <label>Setup code <input name="code" required autofocus autocomplete="one-time-code" spellcheck="false" placeholder="XXXX-XXXX-XXXX-XXXX"></label>
+    <fieldset>
+      <legend>Password <small>optional{{if .Passkeys}} if you'll use a passkey{{end}}</small></legend>
+      <label>New password <small>at least {{.MinPassword}} characters</small><input type="password" name="password" autocomplete="new-password" minlength="{{.MinPassword}}"></label>
+      <label>Repeat it<input type="password" name="confirm" autocomplete="new-password"></label>
+    </fieldset>
+    <button class="primary">Create account</button>
+    {{if .Passkeys}}<p class="muted small">Next you can add a passkey (Touch ID, Windows Hello, a phone or a security key).</p>{{end}}
+  </form>
+  <p class="loginfoot"><button class="link theme-toggle" type="button" data-theme-toggle title="Theme">Theme</button></p>
+</div>
+{{end}}

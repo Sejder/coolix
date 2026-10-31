@@ -1,9 +1,10 @@
-// Package query answers the few read-only questions the unprivileged coolix
-// user needs root-level data for: app logs, the output of activation and
-// backup units, and the list of database backups. On a host it runs as the
-// socket-activated coolix-query@ service (a DynamicUser in the
-// systemd-journal group), so the coolix user itself can't read the rest of
-// the journal.
+// Package query answers the read-only questions the unprivileged coolix user
+// needs root-level data for: app logs and the list of database backups. On a
+// host it runs as the socket-activated coolix-query@ service (a DynamicUser
+// in the systemd-journal group, with the backup directories bind-mounted
+// read-only), so the coolix user itself can't read the rest of the journal.
+//
+// Responses end with a control.Trailer status line, like coolix-control's.
 package query
 
 import (
@@ -16,59 +17,34 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"coolix/internal/control"
 	"coolix/internal/units"
 )
 
 type Request struct {
-	Kind   string // logs | unit | backups
-	App    string // logs, backups
-	Unit   string // unit
-	Lines  int    // logs
-	Follow bool   // logs
+	Kind   string // logs | backups
+	App    string
+	Lines  int  // logs
+	Follow bool // logs
 }
 
 func (r Request) String() string {
-	switch r.Kind {
-	case "logs":
+	if r.Kind == "logs" {
 		f := 0
 		if r.Follow {
 			f = 1
 		}
 		return fmt.Sprintf("logs %s %d %d", r.App, r.Lines, f)
-	case "unit":
-		return "unit " + r.Unit
 	}
 	return r.Kind + " " + r.App
 }
 
-var (
-	activationRe = regexp.MustCompile(`^coolix-activate@[0-9a-df-np-sv-z]{32}-coolix-app-profile\.service$`)
-	backupFileRe = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}Z\.dump$`)
-)
-
-// ValidBackupFile reports whether name looks like a dump coolix wrote.
-func ValidBackupFile(name string) bool { return backupFileRe.MatchString(name) }
-
-// FollowableUnit reports whether the output of unit may be streamed.
-func FollowableUnit(unit string) bool {
-	if activationRe.MatchString(unit) {
-		return true
-	}
-	if app, ok := strings.CutPrefix(unit, units.BackupPrefix); ok {
-		return units.ValidName(strings.TrimSuffix(app, ".service")) && strings.HasSuffix(app, ".service")
-	}
-	if rest, ok := strings.CutPrefix(unit, units.RestorePrefix); ok {
-		app, file, ok := strings.Cut(strings.TrimSuffix(rest, ".service"), "@")
-		return ok && strings.HasSuffix(rest, ".service") && units.ValidName(app) && ValidBackupFile(file)
-	}
-	return false
-}
+const MaxLines = 10000
 
 func Parse(line string) (Request, error) {
 	f := strings.Fields(line)
@@ -81,15 +57,12 @@ func Parse(line string) (Request, error) {
 	case r.Kind == "logs" && len(f) == 4:
 		r.App = f[1]
 		n, err := strconv.Atoi(f[2])
-		if err != nil || n < 0 || n > 10000 {
+		if err != nil || n < 0 || n > MaxLines || (f[3] != "0" && f[3] != "1") {
 			return r, bad
 		}
 		r.Lines, r.Follow = n, f[3] == "1"
 	case r.Kind == "backups" && len(f) == 2:
 		r.App = f[1]
-	case r.Kind == "unit" && len(f) == 2 && FollowableUnit(f[1]):
-		r.Unit = f[1]
-		return r, nil
 	default:
 		return r, bad
 	}
@@ -105,6 +78,19 @@ type Server struct {
 	BackupDir string
 }
 
+// AppUnits are the journal units of an app: its slots, databases, backups
+// and restores.
+func AppUnits(app string) []string {
+	var out []string
+	for _, slot := range units.Slots {
+		out = append(out, units.SlotUnit(app, slot))
+	}
+	for _, kind := range []string{"postgres", "redis"} {
+		out = append(out, units.DBUnit(app, kind))
+	}
+	return append(out, units.BackupUnit(app), units.RestorePrefix+app+"@*.service")
+}
+
 func (s *Server) Handle(ctx context.Context, r Request, w io.Writer) error {
 	switch r.Kind {
 	case "logs":
@@ -112,16 +98,10 @@ func (s *Server) Handle(ctx context.Context, r Request, w io.Writer) error {
 		if r.Follow {
 			args = append(args, "--follow")
 		}
-		for _, slot := range units.Slots {
-			args = append(args, "--unit="+units.SlotUnit(r.App, slot))
+		for _, u := range AppUnits(r.App) {
+			args = append(args, "--unit="+u)
 		}
-		for _, kind := range []string{"postgres", "redis"} {
-			args = append(args, "--unit="+units.DBUnit(r.App, kind))
-		}
-		args = append(args, "--unit="+units.BackupUnit(r.App), "--unit="+units.RestorePrefix+r.App+"@*.service")
-		return journal(ctx, w, args...)
-	case "unit":
-		return journal(ctx, w, "--no-pager", "--follow", "--output=cat", "--since=-1s", "--unit="+r.Unit)
+		return Journal(ctx, w, args...)
 	case "backups":
 		files, err := ListBackups(filepath.Join(s.BackupDir, r.App))
 		if err != nil {
@@ -135,12 +115,14 @@ func (s *Server) Handle(ctx context.Context, r Request, w io.Writer) error {
 	return fmt.Errorf("unknown request %q", r.Kind)
 }
 
-func journal(ctx context.Context, w io.Writer, args ...string) error {
+// Journal runs journalctl; a cancelled context (the client went away) is not
+// an error.
+func Journal(ctx context.Context, w io.Writer, args ...string) error {
 	cmd := exec.CommandContext(ctx, "journalctl", args...)
 	cmd.Stdout, cmd.Stderr = w, w
 	err := cmd.Run()
 	if ctx.Err() != nil {
-		return nil // the client went away
+		return nil
 	}
 	return err
 }
@@ -151,7 +133,8 @@ type BackupFile struct {
 	Time time.Time
 }
 
-// ListBackups returns the dumps in dir, newest first.
+// ListBackups returns the dumps in dir, newest first. A missing directory
+// means no backups yet.
 func ListBackups(dir string) ([]BackupFile, error) {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, os.ErrNotExist) {
@@ -161,7 +144,7 @@ func ListBackups(dir string) ([]BackupFile, error) {
 	}
 	var out []BackupFile
 	for _, e := range entries {
-		if !ValidBackupFile(e.Name()) {
+		if !units.ValidBackupFile(e.Name()) {
 			continue
 		}
 		info, err := e.Info()
@@ -175,30 +158,46 @@ func ListBackups(dir string) ([]BackupFile, error) {
 }
 
 // Serve handles one connection (stdin/stdout of a socket-activated
-// instance): a request line, then the answer. The client closing its end
-// cancels long-running answers such as followed logs.
+// instance): a request line, then the answer and a status trailer. The
+// client closing its end cancels long-running answers such as followed logs.
 func Serve(ctx context.Context, in io.Reader, out io.Writer, s *Server) error {
-	br := bufio.NewReaderSize(in, 512)
-	line, err := br.ReadString('\n')
+	br := bufio.NewReaderSize(in, 256)
+	line, err := readLine(br, 256)
 	if err != nil {
 		return fmt.Errorf("reading request: %w", err)
 	}
-	r, err := Parse(strings.TrimSpace(line))
+	r, err := Parse(line)
+	if err == nil {
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		go func() {
+			io.Copy(io.Discard, br)
+			cancel()
+		}()
+		err = s.Handle(ctx, r, out)
+	}
 	if err != nil {
-		fmt.Fprintln(out, "error:", err)
+		fmt.Fprintf(out, "%serror: %s\n", control.Trailer, strings.ReplaceAll(err.Error(), "\n", "; "))
 		return err
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	go func() {
-		io.Copy(io.Discard, br)
-		cancel()
-	}()
-	return s.Handle(ctx, r, out)
+	fmt.Fprintf(out, "%sok\n", control.Trailer)
+	return nil
+}
+
+// readLine reads one line of at most max bytes.
+func readLine(br *bufio.Reader, max int) (string, error) {
+	line, err := br.ReadSlice('\n')
+	if errors.Is(err, bufio.ErrBufferFull) || len(line) > max {
+		return "", errors.New("request too long")
+	}
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(line)), nil
 }
 
 // Client asks a query server. With Socket empty it answers in-process
-// (development, or when running as root).
+// (development).
 type Client struct {
 	Socket string
 	Local  *Server
@@ -211,7 +210,7 @@ func (c Client) Stream(ctx context.Context, r Request, w io.Writer) error {
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "unix", c.Socket)
 	if err != nil {
-		return err
+		return fmt.Errorf("connecting to coolix-query: %w", err)
 	}
 	defer conn.Close()
 	stop := context.AfterFunc(ctx, func() { conn.Close() })
@@ -219,11 +218,15 @@ func (c Client) Stream(ctx context.Context, r Request, w io.Writer) error {
 	if _, err := io.WriteString(conn, r.String()+"\n"); err != nil {
 		return err
 	}
-	_, err = io.Copy(w, conn)
+	tw := &control.TrailerWriter{W: w}
+	_, err = io.Copy(tw, conn)
 	if ctx.Err() != nil {
-		return nil
+		return nil // we stopped following
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	return tw.Result()
 }
 
 func (c Client) Backups(ctx context.Context, app string) ([]BackupFile, error) {
@@ -233,12 +236,12 @@ func (c Client) Backups(ctx context.Context, app string) ([]BackupFile, error) {
 	}
 	var out []BackupFile
 	for _, line := range strings.Split(strings.TrimSpace(b.String()), "\n") {
+		if line == "" {
+			continue
+		}
 		f := strings.Split(line, "\t")
 		if len(f) != 3 {
-			if line != "" {
-				return nil, errors.New(line)
-			}
-			continue
+			return nil, fmt.Errorf("unexpected backup listing line %q", line)
 		}
 		size, _ := strconv.ParseInt(f[1], 10, 64)
 		ts, _ := strconv.ParseInt(f[2], 10, 64)

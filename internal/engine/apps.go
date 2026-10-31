@@ -53,23 +53,20 @@ func (e *Engine) CreateApp(app *appdef.App) error {
 	if app.PortBase, err = appdef.AllocatePort(existing, e.PortMin, e.PortMax); err != nil {
 		return err
 	}
+	// A token left behind by an app of the same name removed by hand.
+	if err := e.DisableWebhook(app.Name); err != nil {
+		return err
+	}
+	app.Normalize()
 	return e.save(app, "Add app "+app.Name)
 }
 
-// UpdateApp saves and commits changes to an existing app.
-func (e *Engine) UpdateApp(app *appdef.App) error {
-	l, err := e.repoLock()
-	if err != nil {
-		return err
-	}
-	defer l.Release()
-	if _, err := e.App(app.Name); err != nil {
-		return err
-	}
-	return e.save(app, "Update app "+app.Name)
-}
-
 func (e *Engine) save(app *appdef.App, msg string) error {
+	if app.Backup != nil && app.Backup.Schedule != "" {
+		if err := checkCalendar(app.Backup.Schedule); err != nil {
+			return fmt.Errorf("backup schedule %q: %w", app.Backup.Schedule, err)
+		}
+	}
 	r, err := e.Repo()
 	if err != nil {
 		return err
@@ -172,4 +169,24 @@ func (e *Engine) UnsetSecret(app, key string) error {
 		return err
 	}
 	return e.save(a, fmt.Sprintf("Unset secret %s for %s", key, app))
+}
+
+// ModifyApp loads, changes and saves an app under the repo lock, so
+// concurrent edits (e.g. a secret set while the settings form is saved)
+// don't overwrite each other. It returns the changed app, also on error.
+func (e *Engine) ModifyApp(name string, change func(*appdef.App) error) (*appdef.App, error) {
+	l, err := e.repoLock()
+	if err != nil {
+		return nil, err
+	}
+	defer l.Release()
+	app, err := e.App(name)
+	if err != nil {
+		return nil, err
+	}
+	if err := change(app); err != nil {
+		return app, err
+	}
+	app.Normalize()
+	return app, e.save(app, "Update app "+name)
 }

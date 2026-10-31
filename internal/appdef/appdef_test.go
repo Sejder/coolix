@@ -37,6 +37,10 @@ func TestValidateRejects(t *testing.T) {
 		"memory":           func(a *App) { a.Resources = &Resources{MemoryMax: "lots"} },
 		"branch":           func(a *App) { a.Webhook = &Webhook{Branch: "a..b"} },
 		"path env":         func(a *App) { a.Env = map[string]string{"PATH": "/tmp"} },
+		"long name":        func(a *App) { a.Name = "a-twenty-one-chars-xx" },
+		"dot command":      func(a *App) { a.Command = "./bin/x" },
+		"double slash":     func(a *App) { a.Command = "bin//x" },
+		"pre_start time":   func(a *App) { a.PreStartTimeout = "3h" },
 	}
 	for name, mutate := range cases {
 		a := valid()
@@ -108,5 +112,17 @@ func TestValidateDatabasesAndSecrets(t *testing.T) {
 		if err := a.Validate(); err == nil {
 			t.Errorf("%s: expected error", name)
 		}
+	}
+}
+
+func TestNormalizeDropsBackupWithoutPostgres(t *testing.T) {
+	a := valid()
+	a.Backup = &Backup{Schedule: "daily"}
+	a.Normalize()
+	if a.Backup != nil {
+		t.Fatal("backup kept without postgres")
+	}
+	if err := a.Validate(); err != nil {
+		t.Fatal(err)
 	}
 }

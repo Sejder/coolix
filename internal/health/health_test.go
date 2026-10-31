@@ -38,3 +38,19 @@ func TestCheck(t *testing.T) {
 		t.Fatal("closed port should fail")
 	}
 }
+
+func TestNoRedirects(t *testing.T) {
+	followed := false
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { followed = true }))
+	defer elsewhere.Close()
+	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL, http.StatusFound)
+	}))
+	defer app.Close()
+	if err := Check(context.Background(), port(t, app), "/healthz"); err != nil {
+		t.Fatal(err)
+	}
+	if followed {
+		t.Fatal("health check followed a redirect")
+	}
+}

@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -91,17 +92,31 @@ func Verify(h http.Header, body []byte, token string) (*Delivery, error) {
 		}
 		d.Provider, d.Event = "bearer", "push"
 	}
-	var payload struct {
-		Ref string `json:"ref"`
-	}
-	if json.Unmarshal(body, &payload) == nil {
-		d.Ref = payload.Ref
-	}
+	d.Ref = ref(h, body)
 	return d, nil
 }
 
+// ref extracts the pushed ref from a JSON body, or from the form-encoded
+// "payload" field GitHub sends when the hook's content type is
+// application/x-www-form-urlencoded.
+func ref(h http.Header, body []byte) string {
+	if strings.HasPrefix(h.Get("Content-Type"), "application/x-www-form-urlencoded") {
+		if form, err := url.ParseQuery(string(body)); err == nil {
+			body = []byte(form.Get("payload"))
+		}
+	}
+	var payload struct {
+		Ref string `json:"ref"`
+	}
+	if json.Unmarshal(body, &payload) != nil {
+		return ""
+	}
+	return payload.Ref
+}
+
 // Matches reports whether a delivery should deploy an app that tracks
-// branch ("" tracks every branch).
+// branch ("" tracks every branch). With a branch set, a delivery whose ref
+// is unknown doesn't match.
 func (d *Delivery) Matches(branch string) bool {
-	return branch == "" || d.Ref == "" || d.Ref == "refs/heads/"+branch
+	return branch == "" || d.Ref == "refs/heads/"+branch
 }

@@ -3,6 +3,7 @@ package units
 import (
 	"errors"
 	"fmt"
+	"net"
 	"path"
 	"regexp"
 	"sort"
@@ -11,22 +12,46 @@ import (
 )
 
 var (
-	nameRe     = regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}[a-z0-9]$`)
+	// 2-20 chars: systemd caps user names at 31, and DynamicUser is coolix-app-<name>.
+	nameRe     = regexp.MustCompile(`^[a-z][a-z0-9-]{0,18}[a-z0-9]$`)
+	backupRe   = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}Z\.dump$`)
 	envKeyRe   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-	domainRe   = regexp.MustCompile(`^(?i:[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(\.(?i:[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?))*$`)
+	labelRe    = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 	storeRe    = regexp.MustCompile(`^/nix/store/[0-9a-df-np-sv-z]{32}-[A-Za-z0-9+._?=-]+$`)
 	storeExeRe = regexp.MustCompile(`^/nix/store/[0-9a-df-np-sv-z]{32}-[A-Za-z0-9+._?=-]+(/[A-Za-z0-9+._-]+)+$`)
 	healthRe   = regexp.MustCompile(`^/[!-~]*$`)
 	memoryRe   = regexp.MustCompile(`^([0-9]+[KMGT]?|[0-9]{1,2}%|infinity)$`)
 	cpuRe      = regexp.MustCompile(`^[0-9]{1,5}%$`)
 	calendarRe = regexp.MustCompile(`^[A-Za-z0-9*:,./~ -]{1,64}$`)
+	durationRe = regexp.MustCompile(`^[0-9]+(ms|s|m|h)$`)
 )
 
-// ValidName reports whether s is a valid app name.
+// ValidName reports whether s is a valid app name (2-20 chars of a-z, 0-9, -).
 func ValidName(s string) bool { return nameRe.MatchString(s) }
 
-// ValidDomain reports whether s is a hostname coolix may route.
-func ValidDomain(s string) bool { return len(s) <= 253 && domainRe.MatchString(s) }
+// ValidBackupFile reports whether name looks like a dump coolix wrote.
+func ValidBackupFile(name string) bool { return backupRe.MatchString(name) }
+
+// ValidDomain reports whether s is a fully qualified hostname coolix may
+// route: at least two labels, no IP addresses, no wildcards.
+func ValidDomain(s string) bool {
+	s = strings.ToLower(s)
+	if len(s) > 253 || net.ParseIP(s) != nil {
+		return false
+	}
+	labels := strings.Split(s, ".")
+	if len(labels) < 2 {
+		return false
+	}
+	for _, l := range labels {
+		if !labelRe.MatchString(l) {
+			return false
+		}
+	}
+	// A numeric top-level label would make it an IP-ish name.
+	tld := labels[len(labels)-1]
+	return strings.Trim(tld, "0123456789") != ""
+}
 
 // ValidEnvKey reports whether s is a valid environment variable name.
 func ValidEnvKey(s string) bool { return envKeyRe.MatchString(s) }
@@ -43,6 +68,9 @@ func ReservedEnv(k string) bool {
 // MaxHealthTimeout bounds how long an activation waits for one app.
 const MaxHealthTimeout = 10 * time.Minute
 
+// MaxPreStartTimeout bounds how long a pre_start command may run.
+const MaxPreStartTimeout = 2 * time.Hour
+
 // Hardening settings an app may change. Everything that would let it gain
 // privileges (DynamicUser, NoNewPrivileges, capabilities, ProtectSystem,
 // RestrictSUIDSGID, ...) is fixed.
@@ -54,13 +82,38 @@ var relaxable = map[string]bool{
 	"LockPersonality": true,
 }
 
+// Additive settings: the value is added to coolix's default, never replaces
+// it. RestrictAddressFamilies adds families, SystemCallFilter adds syscalls
+// or groups to the allow list.
 var stringSettings = map[string]*regexp.Regexp{
-	"RestrictAddressFamilies": regexp.MustCompile(`^(none|~?AF_[A-Z0-9]+( +AF_[A-Z0-9]+)*)$`),
-	"SystemCallFilter":        regexp.MustCompile(`^~?@?[a-z0-9_-]+( +@?[a-z0-9_-]+)*$`),
+	"RestrictAddressFamilies": regexp.MustCompile(`^AF_[A-Z0-9]+( +AF_[A-Z0-9]+)*$`),
+	"SystemCallFilter":        regexp.MustCompile(`^@?[a-z0-9_-]+( +@?[a-z0-9_-]+)*$`),
 	"UMask":                   regexp.MustCompile(`^0[0-7]{3}$`),
 }
 
-// CheckHardening validates [hardening] overrides.
+// DefaultAllowedHardening are the [hardening] keys apps may use unless the
+// host allows more (services.coolix.apps.allowedHardeningOverrides). The rest
+// widen the kernel attack surface (namespaces, devices, kernel interfaces).
+var DefaultAllowedHardening = []string{
+	"MemoryDenyWriteExecute", "PrivateTmp", "ProtectHome", "ProtectHostname",
+	"ProtectClock", "RestrictRealtime", "LockPersonality", "UMask",
+	"RestrictAddressFamilies", "SystemCallFilter",
+}
+
+// HardeningKeys lists every key [hardening] understands.
+func HardeningKeys() []string {
+	var out []string
+	for k := range relaxable {
+		out = append(out, k)
+	}
+	for k := range stringSettings {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// CheckHardening validates the syntax of [hardening] overrides.
 func CheckHardening(h map[string]any) error {
 	var errs []error
 	for _, k := range sortedKeys(h) {
@@ -77,21 +130,9 @@ func CheckHardening(h map[string]any) error {
 			}
 			continue
 		}
-		errs = append(errs, fmt.Errorf("hardening %s: not something apps may change (allowed: %s)", k, strings.Join(allowedHardening(), ", ")))
+		errs = append(errs, fmt.Errorf("hardening %s: not something apps may change (known: %s)", k, strings.Join(HardeningKeys(), ", ")))
 	}
 	return errors.Join(errs...)
-}
-
-func allowedHardening() []string {
-	var out []string
-	for k := range relaxable {
-		out = append(out, k)
-	}
-	for k := range stringSettings {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }
 
 func CheckResources(r Resources) error {
@@ -125,40 +166,90 @@ func CheckBackup(b Backup, hasPostgres bool) error {
 	return errors.Join(errs...)
 }
 
-func CheckHealthTimeout(s string) error {
+func checkDuration(what, s string, max time.Duration) error {
 	if s == "" {
 		return nil
 	}
 	d, err := time.ParseDuration(s)
-	if err != nil || d <= 0 || d > MaxHealthTimeout {
-		return fmt.Errorf("health timeout %q: want a duration up to %s, e.g. 30s", s, MaxHealthTimeout)
+	if err != nil || !durationRe.MatchString(s) || d <= 0 || d > max {
+		return fmt.Errorf("%s %q: want a duration up to %s, e.g. 30s or 5m", what, s, max)
 	}
 	return nil
+}
+
+func CheckHealthTimeout(s string) error { return checkDuration("health timeout", s, MaxHealthTimeout) }
+func CheckPreStartTimeout(s string) error {
+	return checkDuration("pre_start_timeout", s, MaxPreStartTimeout)
 }
 
 // Policy is what root enforces on every profile before activating it.
 type Policy struct {
 	PortMin, PortMax int
-	// ReservedDomains can't be claimed by apps (e.g. the UI's domain).
+	// ReservedDomains can't be claimed by apps: the UI's domain and the
+	// host's other Caddy sites. "*.example.com" reserves every subdomain.
 	ReservedDomains []string
+	// AllowedHardening lists the [hardening] keys apps may use; nil means
+	// DefaultAllowedHardening.
+	AllowedHardening []string
+	// CheckCalendar validates a backup schedule (systemd-analyze calendar);
+	// nil skips the check.
+	CheckCalendar func(string) error
+}
+
+func (p Policy) allowedHardening() map[string]bool {
+	keys := p.AllowedHardening
+	if keys == nil {
+		keys = DefaultAllowedHardening
+	}
+	out := map[string]bool{}
+	for _, k := range keys {
+		out[k] = true
+	}
+	return out
+}
+
+// reserved reports whether domain d is reserved, and by what.
+func (p Policy) reserved(d string) (string, bool) {
+	d = strings.ToLower(d)
+	for _, r := range p.ReservedDomains {
+		r = strings.ToLower(r)
+		if suffix, ok := strings.CutPrefix(r, "*."); ok {
+			if strings.HasSuffix(d, "."+suffix) {
+				return r, true
+			}
+		} else if d == r {
+			return r, true
+		}
+	}
+	return "", false
 }
 
 // Validate checks every field of m that ends up in a unit, a Caddy snippet
 // or a health check. It must not trust anything the Nix lib did.
 func (p Policy) Validate(m *Manifest) error {
-	var errs []error
+	errs := p.ValidateApps(m)
+	var all []error
+	for _, name := range sortedKeys(errs) {
+		all = append(all, errs[name])
+	}
+	return errors.Join(all...)
+}
+
+// ValidateApps is Validate, per app. Conflicts (ports, domains) are blamed
+// on the app that comes later by name.
+func (p Policy) ValidateApps(m *Manifest) map[string]error {
+	out := map[string]error{}
 	ports := map[int]string{}
 	domains := map[string]string{}
-	for _, d := range p.ReservedDomains {
-		domains[strings.ToLower(d)] = "coolix itself"
-	}
+	allowed := p.allowedHardening()
 	for _, name := range sortedKeys(m.Apps) {
 		app := m.Apps[name]
+		var errs []error
 		fail := func(format string, args ...any) {
 			errs = append(errs, fmt.Errorf("app %s: "+format, append([]any{name}, args...)...))
 		}
 		if !ValidName(name) {
-			errs = append(errs, fmt.Errorf("invalid app name %q", name))
+			out[name] = fmt.Errorf("invalid app name %q (2-20 chars of a-z, 0-9 and -)", name)
 			continue
 		}
 		if !validExe(app.Exe) {
@@ -167,6 +258,9 @@ func (p Policy) Validate(m *Manifest) error {
 		if app.PreStart != "" && !validExe(app.PreStart) {
 			fail("pre_start %q: must be a file inside a store path", app.PreStart)
 		}
+		if err := CheckPreStartTimeout(app.PreStartTimeout); err != nil {
+			fail("%v", err)
+		}
 		if app.PortBase < p.PortMin || app.PortBase+1 > p.PortMax {
 			fail("port_base %d: outside the allowed range %d-%d", app.PortBase, p.PortMin, p.PortMax)
 		}
@@ -174,17 +268,16 @@ func (p Policy) Validate(m *Manifest) error {
 			if other, ok := ports[port]; ok {
 				fail("port %d already used by %s", port, other)
 			}
-			ports[port] = name
 		}
 		for _, d := range app.Domains {
+			ld := strings.ToLower(d)
 			if !ValidDomain(d) {
-				fail("domain %q: invalid hostname", d)
-				continue
-			}
-			if other, ok := domains[strings.ToLower(d)]; ok {
+				fail("domain %q: invalid hostname (a fully qualified name, no IP addresses)", d)
+			} else if r, ok := p.reserved(d); ok {
+				fail("domain %s is reserved by the host (%s)", d, r)
+			} else if other, ok := domains[ld]; ok {
 				fail("domain %s already used by %s", d, other)
 			}
-			domains[strings.ToLower(d)] = name
 		}
 		if app.Health.Path != "" && !healthRe.MatchString(app.Health.Path) {
 			fail("health path %q: must start with / and contain no spaces", app.Health.Path)
@@ -221,18 +314,43 @@ func (p Policy) Validate(m *Manifest) error {
 		if err := CheckHardening(app.Hardening); err != nil {
 			fail("%v", err)
 		}
+		for _, k := range sortedKeys(app.Hardening) {
+			if !allowed[k] {
+				fail("hardening %s: not allowed on this host (see services.coolix.apps.allowedHardeningOverrides)", k)
+			}
+		}
 		if err := CheckResources(app.Resources); err != nil {
 			fail("%v", err)
 		}
 		if err := CheckBackup(app.Backup, seen["postgres"]); err != nil {
 			fail("%v", err)
+		} else if app.Backup.Schedule != "" && p.CheckCalendar != nil {
+			if err := p.CheckCalendar(app.Backup.Schedule); err != nil {
+				fail("backup schedule %q: %v", app.Backup.Schedule, err)
+			}
+		}
+		if len(errs) > 0 {
+			out[name] = errors.Join(errs...)
+			continue
+		}
+		// Only valid apps claim ports and domains.
+		ports[app.PortBase], ports[app.PortBase+1] = name, name
+		for _, d := range app.Domains {
+			domains[strings.ToLower(d)] = name
 		}
 	}
-	return errors.Join(errs...)
+	return out
 }
 
 func validExe(s string) bool {
-	return storeExeRe.MatchString(s) && path.Clean(s) == s && !strings.Contains(s, "/../") && !strings.HasSuffix(s, "/..")
+	return storeExeRe.MatchString(s) && path.Clean(s) == s
+}
+
+// CleanRelative reports whether s is a clean relative path (no ., .., //,
+// trailing /), as used for commands inside a package.
+func CleanRelative(s string) bool {
+	return s != "" && !strings.HasPrefix(s, "/") && path.Clean(s) == s && s != "." &&
+		!strings.HasPrefix(s, "../") && s != ".."
 }
 
 func sortedKeys[V any](m map[string]V) []string {

@@ -3,7 +3,6 @@
 package profile
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -13,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"coolix/internal/units"
 )
 
 type Generation struct {
@@ -91,28 +92,23 @@ func StorePath(name string) (string, error) {
 		return "", fmt.Errorf("%q is not a coolix app profile store path", name)
 	}
 	p := "/nix/store/" + name
-	if _, err := os.Stat(filepath.Join(p, "apps.json")); err != nil {
-		return "", fmt.Errorf("%s: not a valid app profile: %w", p, err)
+	// A real directory: a profile that is a symlink could point root at
+	// files the unprivileged side controls.
+	if st, err := os.Lstat(p); err != nil || !st.IsDir() {
+		return "", fmt.Errorf("%s: not an app profile directory", p)
 	}
 	return p, nil
 }
 
 // summary reads the revision and app names of any manifest version.
 func summary(profile string) (rev string, apps []string) {
-	data, err := os.ReadFile(filepath.Join(profile, "apps.json"))
+	s, err := units.ReadSummary(profile)
 	if err != nil {
 		return "", nil
 	}
-	var m struct {
-		Rev  string                     `json:"rev"`
-		Apps map[string]json.RawMessage `json:"apps"`
-	}
-	if json.Unmarshal(data, &m) != nil {
-		return "", nil
-	}
-	for name := range m.Apps {
+	for name := range s.Apps {
 		apps = append(apps, name)
 	}
 	sort.Strings(apps)
-	return m.Rev, apps
+	return s.Rev, apps
 }

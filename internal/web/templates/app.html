@@ -1,7 +1,7 @@
 {{define "content"}}
 <div class="pagehead">
   <div>
-    <h1>{{.App.Name}} {{template "slot" .AppState}}</h1>
+    <h1>{{.App.Name}} <span id="slot" hx-get="/apps/{{.App.Name}}" hx-select="#slot" hx-trigger="every 5s" hx-swap="outerHTML">{{template "slot" .AppState}}</span></h1>
     <p class="sub">
       {{range .App.Domains}}<a class="domain" href="https://{{.}}" rel="noopener">{{.}}</a> {{end}}
       <code class="src">{{.App.Source}}</code>
@@ -26,7 +26,7 @@
       <ul class="secrets">
         {{range .Secrets}}
         <li><code>{{.Name}}</code>{{if .Pending}} <span class="pill warnpill">not deployed</span>{{end}}
-          <form method="post" action="/apps/{{$.App.Name}}/secrets/{{.Name}}/delete" data-confirm="Remove secret {{.Name}}?"><button class="link danger">remove</button></form></li>
+          <form method="post" action="/apps/{{$.App.Name}}/secrets/{{.Name}}/delete" hx-confirm="Remove secret {{.Name}}?"><button class="link danger">remove</button></form></li>
         {{else}}
         <li class="muted">No secrets.</li>
         {{end}}
@@ -53,7 +53,7 @@
       <p class="muted small">Deploy automatically when you push: your forge calls a signed URL on this server.</p>
       {{end}}
       <div class="inline">
-        <form method="post" action="/apps/{{.App.Name}}/webhook"{{if .Webhook}} data-confirm="Rotate the webhook secret? The old one stops working."{{end}}>
+        <form method="post" action="/apps/{{.App.Name}}/webhook"{{if .Webhook}} hx-confirm="Rotate the webhook secret? The old one stops working."{{end}}>
           <button>{{if .Webhook}}Rotate secret{{else}}Enable{{end}}</button></form>
         {{if .Webhook}}<form method="post" action="/apps/{{.App.Name}}/webhook"><input type="hidden" name="action" value="disable"><button class="link danger">disable</button></form>{{end}}
       </div>
@@ -80,7 +80,7 @@
 
     <section class="card flush">
       <h2 class="pad">Deploys</h2>
-      {{template "jobs" .Jobs}}
+      <div id="appjobs" hx-get="/apps/{{.App.Name}}" hx-select="#appjobs" hx-trigger="every 5s" hx-swap="outerHTML">{{template "jobs" .Jobs}}</div>
     </section>
 
     <section class="card dangerzone">

@@ -7,8 +7,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
+	"coolix/internal/control"
 	"coolix/internal/query"
 	"coolix/internal/units"
 	"coolix/internal/webhook"
@@ -65,61 +67,31 @@ func (e *Engine) DisableWebhook(app string) error {
 
 // Backups ----------------------------------------------------------------
 
-// deployedPostgres checks that app runs with a postgres database (backup
-// units exist only then).
-func (e *Engine) deployedPostgres(app string) error {
-	m, err := units.ReadManifest(e.Profile)
-	if err != nil {
-		return fmt.Errorf("nothing deployed: %w", err)
-	}
-	a, ok := m.Apps[app]
-	if !ok {
-		return fmt.Errorf("app %s is not deployed", app)
-	}
-	if _, ok := a.Database("postgres"); !ok {
-		return fmt.Errorf("app %s has no deployed postgres database", app)
-	}
-	return nil
-}
-
-// Backup dumps the app's postgres database now.
+// Backup dumps the app's postgres database now (through coolix-control,
+// which starts the root-rendered backup unit).
 func (e *Engine) Backup(ctx context.Context, app string) error {
-	if err := e.deployedPostgres(app); err != nil {
-		return err
+	if !units.ValidName(app) {
+		return fmt.Errorf("invalid app name %q", app)
 	}
-	unit := units.BackupUnit(app)
-	e.logf("backing up %s via %s", app, unit)
-	if err := e.runUnit(ctx, unit); err != nil {
-		return fmt.Errorf("backup failed (%s): %w", unit, err)
-	}
-	return nil
+	return e.privileged(ctx, control.Request{Verb: "backup", Arg: app})
 }
 
 // Restore replaces the app's database contents with a backup.
 func (e *Engine) Restore(ctx context.Context, app, file string) error {
-	if err := e.deployedPostgres(app); err != nil {
-		return err
+	if !units.ValidName(app) {
+		return fmt.Errorf("invalid app name %q", app)
 	}
-	if !query.ValidBackupFile(file) {
+	if !units.ValidBackupFile(file) {
 		return fmt.Errorf("%q is not a backup name (see `coolix db backups %s`)", file, app)
 	}
 	files, err := e.Backups(ctx, app)
 	if err != nil {
 		return err
 	}
-	found := false
-	for _, f := range files {
-		found = found || f.Name == file
-	}
-	if !found {
+	if !slices.ContainsFunc(files, func(f query.BackupFile) bool { return f.Name == file }) {
 		return fmt.Errorf("%s has no backup %s", app, file)
 	}
-	unit := units.RestoreInstance(app, file)
-	e.logf("restoring %s from %s via %s", app, file, unit)
-	if err := e.runUnit(ctx, unit); err != nil {
-		return fmt.Errorf("restore failed (%s): %w", unit, err)
-	}
-	return nil
+	return e.privileged(ctx, control.Request{Verb: "restore", Arg: app, File: file})
 }
 
 func (e *Engine) Backups(ctx context.Context, app string) ([]query.BackupFile, error) {

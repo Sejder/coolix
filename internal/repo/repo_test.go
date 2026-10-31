@@ -3,6 +3,7 @@ package repo
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -85,5 +86,51 @@ func TestRestoreTree(t *testing.T) {
 	}
 	if err := r.RestoreTree("deadbeef"); err == nil {
 		t.Fatal("expected error for unknown revision")
+	}
+}
+
+func TestCloneAndAdopt(t *testing.T) {
+	r := &Repo{Dir: filepath.Join(t.TempDir(), "repo"), Nixpkgs: "/nix/store/a", Lib: "/nix/store/b", System: "x86_64-linux"}
+	if err := r.Init(); err != nil {
+		t.Fatal(err)
+	}
+	base, _ := r.Head()
+
+	// Untouched main repo: fast-forward.
+	c, err := r.Clone(filepath.Join(t.TempDir(), "clone"), base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(c.Dir, "flake.lock"), []byte("lock1"), 0o644)
+	if err := c.Commit("Deploy"); err != nil {
+		t.Fatal(err)
+	}
+	built, err := r.Adopt(c, base, "Deploy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head, _ := r.Head(); head != built {
+		t.Fatalf("not fast-forwarded: head %s built %s", head, built)
+	}
+
+	// Edits meanwhile: only flake.lock is taken over.
+	base = built
+	c, _ = r.Clone(filepath.Join(t.TempDir(), "clone"), base)
+	os.WriteFile(filepath.Join(c.Dir, "flake.lock"), []byte("lock2"), 0o644)
+	c.Commit("Deploy")
+	os.WriteFile(filepath.Join(r.Dir, "apps", "note"), []byte("edit"), 0o644)
+	r.Commit("Edit")
+	built, err = r.Adopt(c, base, "Deploy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(filepath.Join(r.Dir, "flake.lock")); string(data) != "lock2" {
+		t.Fatalf("lock not adopted: %q", data)
+	}
+	if _, err := os.Stat(filepath.Join(r.Dir, "apps", "note")); err != nil {
+		t.Fatal("edit lost")
+	}
+	if head, _ := r.Head(); head == built {
+		t.Fatal("built commit should be the clone's, not the merged head")
 	}
 }

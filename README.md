@@ -7,7 +7,7 @@ A self-hosting platform in the spirit of [Coolify](https://coolify.io) and
 apps are Nix flakes that run as hardened systemd units, and everything that's
 deployed is recorded in a git repo.
 
-![Dashboard](docs/screenshots/dashboard.png)
+![Dashboard](docs/screenshots/dashboard-dark.png)
 
 > **Status:** young. All milestones of the first version are done and covered
 > by NixOS VM tests, but nobody has run it in production yet. Expect rough edges.
@@ -36,6 +36,9 @@ deployed is recorded in a git repo.
   `ProtectSystem=strict`, a syscall filter and an empty capability set. Root
   renders every unit from validated data, so neither an app definition nor a
   compromised web UI can opt out of the sandbox.
+- **Passkeys.** Sign in with Touch ID, Windows Hello, a phone or a security key,
+  a password, or both. A fresh install can only be claimed with a code from
+  the server itself.
 - **Deploy on push.** Each app can get a signed webhook URL for GitHub,
   Gitea, Forgejo, GitLab or any CI job.
 - **Database backups.** Scheduled or on-demand `pg_dump`s with retention, and
@@ -48,8 +51,12 @@ deployed is recorded in a git repo.
 | App | Live deploy log |
 |---|---|
 | ![App page](docs/screenshots/app.png) | ![Deploy](docs/screenshots/deploy.png) |
-| **Generations** | **Sign in** |
+| **Generations** | **Sign in (passkey or password)** |
 | ![Generations](docs/screenshots/generations.png) | ![Login](docs/screenshots/login.png) |
+| **First-run setup** | **Account and passkeys** |
+| ![Setup](docs/screenshots/setup.png) | ![Account](docs/screenshots/account.png) |
+| **Light theme** | **Dark theme** |
+| ![Dashboard, light](docs/screenshots/dashboard.png) | ![App, dark](docs/screenshots/app-dark.png) |
 
 The screenshots are taken by a NixOS VM test that drives the real UI in
 headless Chromium (`tests/ui.nix`), so they always show the current version.
@@ -72,7 +79,6 @@ Add coolix to your NixOS flake:
             caddy.acmeEmail = "you@example.com";
             caddy.openFirewall = true;
             ui.domain = "coolix.example.com";
-            ui.adminPasswordFile = "/run/secrets/coolix-admin"; # e.g. from sops-nix or agenix
           };
         }
       ];
@@ -80,6 +86,11 @@ Add coolix to your NixOS flake:
   };
 }
 ```
+
+Open `https://coolix.example.com`. To prove the server is yours, the setup page
+asks for a one-time code: run `sudo coolix setup-code` on the server. Then add a
+passkey and/or a password. (Prefer it declarative? Set
+`ui.adminPasswordFile`, e.g. from agenix or sops-nix.)
 
 Then deploy your first app, either from the web UI or the CLI:
 
@@ -115,6 +126,8 @@ coolix db backup APP                       dump the app's postgres database now
 coolix db backups APP                      list its dumps
 coolix db restore APP BACKUP               replace the database's contents with a dump
 coolix webhook enable|show|disable APP     manage the app's deploy webhook
+coolix setup-code                          one-time code to create the UI's admin account
+coolix account reset                       remove the admin's password and passkeys (lost access)
 ```
 
 Run it with `sudo`. It drops to the unprivileged `coolix` user straight away.
@@ -141,7 +154,7 @@ them in `path` in `app.toml`.
 
 - [How it works](docs/architecture.md): the apps repo, profiles, activation, blue/green and the security model
 - [`app.toml` reference](docs/app-toml.md)
-- [NixOS options](docs/options.md)
+- [NixOS options](docs/options.md), including the admin account and upgrade notes
 
 ## Development
 

@@ -16,6 +16,9 @@ let
     id -un > "$out/user"
     cat migrated > "$out/migrated" 2>/dev/null || echo no > "$out/migrated"
     (hello 2>/dev/null || echo none) > "$out/hello"
+    # May it listen on a port that isn't its own (the UI's)?
+    ${pkgs.python3}/bin/python3 -c 'import socket; socket.socket().bind(("127.0.0.1", 8090))' 2>/dev/null \
+      && echo bound > "$out/squat" || echo denied > "$out/squat"
     exec ${pkgs.python3}/bin/python3 -m http.server "$PORT" --bind 127.0.0.1 --directory "$out"
   '';
   # pre_start: runs in the app's state directory before each start.

@@ -138,3 +138,52 @@ func (r *Repo) SameTree(rev string) bool {
 	a := tree(rev)
 	return a != "" && a == tree("HEAD")
 }
+
+// Clone makes a private working copy of rev at dst on branch "deploy", so
+// slow work (locking inputs fetches from the network) can happen without
+// holding up edits to the main repo.
+func (r *Repo) Clone(dst, rev string) (*Repo, error) {
+	if err := os.RemoveAll(dst); err != nil {
+		return nil, err
+	}
+	if err := r.git("clone", "-q", "--shared", "--no-checkout", r.Dir, dst); err != nil {
+		return nil, err
+	}
+	c := &Repo{Dir: dst, Nixpkgs: r.Nixpkgs, Lib: r.Lib, System: r.System}
+	return c, c.git("checkout", "-q", "-B", "deploy", rev)
+}
+
+// Adopt brings the "deploy" branch of clone back into r. If r is still at
+// base it fast-forwards; otherwise (edits happened meanwhile) only
+// flake.lock is taken over and committed with msg. It returns the commit of
+// the clone, which is what gets built.
+func (r *Repo) Adopt(clone *Repo, base, msg string) (string, error) {
+	if err := r.git("fetch", "-q", clone.Dir, "+refs/heads/deploy:refs/coolix/deploy"); err != nil {
+		return "", err
+	}
+	built, err := r.revParse("refs/coolix/deploy")
+	if err != nil {
+		return "", err
+	}
+	head, err := r.Head()
+	if err != nil {
+		return "", err
+	}
+	if head == base {
+		return built, r.git("merge", "-q", "--ff-only", "refs/coolix/deploy")
+	}
+	if err := r.git("checkout", "refs/coolix/deploy", "--", "flake.lock"); err != nil {
+		return "", err
+	}
+	return built, r.Commit(msg)
+}
+
+func (r *Repo) revParse(ref string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	cmd.Dir = r.Dir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse %s: %w", ref, err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}

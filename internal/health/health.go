@@ -10,6 +10,12 @@ import (
 	"time"
 )
 
+// client runs as root and must not follow redirects the app chooses: a 3xx
+// answer is a healthy (< 400) answer.
+var client = &http.Client{
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+}
+
 // Check probes 127.0.0.1:port once. With a path it expects an HTTP status
 // below 400; without one, an accepted TCP connection is enough.
 func Check(ctx context.Context, port int, path string) error {
@@ -28,7 +34,7 @@ func Check(ctx context.Context, port int, path string) error {
 	if err != nil {
 		return err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}

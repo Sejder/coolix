@@ -6,11 +6,12 @@ commit as the `coolix` user. They're validated on every load, and root
 validates the result again before activating it.
 
 ```toml
-name = "blog"                       # must match the directory; a-z, 0-9, -
+name = "blog"                       # must match the directory; 2-20 chars of a-z, 0-9, -
 source = "github:you/blog"          # any flake reference
 package = "default"                 # packages.<system>.<package>; default "default"
 command = "bin/blog"                # path inside the package; default: meta.mainProgram
 pre_start = "bin/migrate"           # path inside the package, run before every start of a slot
+pre_start_timeout = "15m"           # how long pre_start may run (default 15m, max 2h)
 domains = ["blog.example.com"]      # routed through Caddy; omit for internal-only apps
 port_base = 20010                   # allocated by coolix: blue = 20010, green = 20011
 follow_nixpkgs = true               # make the app's nixpkgs input follow the host's (default)
@@ -52,18 +53,24 @@ before *every* start of a slot (deploys, restarts after a crash, reboots), so
 it must be idempotent. Database migrations are the typical use. If it fails,
 the slot doesn't start, and a deploy keeps the old version running.
 
+Apps can only listen on their own two ports (`port_base` and `port_base + 1`).
+Domains must be fully qualified (`app.example.com`, not `localhost` or an IP)
+and not used by the host's other Caddy sites.
+
 Reserved variable names: `PORT`, `PATH`, `COOLIX_*`, `DATABASE_URL`,
 `REDIS_URL`, `PGHOST`, `PGUSER`, `PGDATABASE`, `CREDENTIALS_DIRECTORY`.
 
 ## `[hardening]`
 
-Apps can relax only settings that don't give them privileges:
+Apps can relax only settings that don't give them privileges, and only those
+the host allows (`services.coolix.apps.allowedHardeningOverrides`; see
+[options](options.md)):
 
 | Setting | Values |
 |---|---|
 | `MemoryDenyWriteExecute`, `PrivateDevices`, `PrivateTmp`, `ProtectHome`, `ProtectClock`, `ProtectHostname`, `ProtectKernelLogs`, `ProtectKernelModules`, `ProtectKernelTunables`, `ProtectControlGroups`, `RestrictNamespaces`, `RestrictRealtime`, `LockPersonality` | `true` / `false` |
-| `RestrictAddressFamilies` | e.g. `"AF_INET AF_INET6 AF_UNIX AF_NETLINK"` |
-| `SystemCallFilter` | e.g. `"@system-service @pkey"` |
+| `RestrictAddressFamilies` | families to add to `AF_INET AF_INET6 AF_UNIX`, e.g. `"AF_NETLINK"` |
+| `SystemCallFilter` | syscalls or groups to add to `@system-service`, e.g. `"@pkey"` |
 | `UMask` | e.g. `"0027"` |
 
 Everything else (`DynamicUser`, `User`, `NoNewPrivileges`, capabilities,

@@ -15,13 +15,22 @@ func runLogs(ctx context.Context, e *engine.Engine, args []string) error {
 	fs := flag.NewFlagSet("logs", flag.ContinueOnError)
 	follow := fs.Bool("f", false, "follow")
 	lines := fs.Int("n", 100, "number of lines")
-	if len(args) == 0 {
-		return errors.New("usage: coolix logs APP [-f] [-n LINES]")
-	}
-	if err := fs.Parse(args[1:]); err != nil {
+	usage := errors.New("usage: coolix logs APP [-f] [-n LINES]")
+	// Flags may come before or after the app name.
+	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	return e.Logs(ctx, args[0], *lines, *follow, os.Stdout)
+	if fs.NArg() == 0 {
+		return usage
+	}
+	app := fs.Arg(0)
+	if err := fs.Parse(fs.Args()[1:]); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return usage
+	}
+	return e.Logs(ctx, app, *lines, *follow, os.Stdout)
 }
 
 func runDB(ctx context.Context, e *engine.Engine, args []string) error {

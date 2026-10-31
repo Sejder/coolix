@@ -12,13 +12,17 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"coolix/internal/appdef"
 	"coolix/internal/engine"
 	"coolix/internal/webhook"
+
+	"github.com/go-webauthn/webauthn/webauthn"
 )
 
 //go:embed templates static
@@ -30,6 +34,18 @@ type Server struct {
 	SessionKey    []byte
 	SecureCookies bool
 	Jobs          Jobs
+
+	logins loginLimiter
+
+	// Accounts holds the admin account; defaults to <stateDir>/account.json.
+	Accounts *AccountStore
+	// WebAuthnOrigins are the origins passkeys work on; empty disables them.
+	WebAuthnOrigins []string
+	webauthn        *webauthn.WebAuthn
+	ceremonies      ceremonies
+
+	hookMu     sync.Mutex
+	hookQueued map[string]*Job // webhook deploys waiting for the deploy lock
 
 	pages map[string]*template.Template
 }
@@ -103,6 +119,12 @@ var funcs = template.FuncMap{
 }
 
 func (s *Server) Handler() (http.Handler, error) {
+	if s.Accounts == nil {
+		s.Accounts = &AccountStore{Path: filepath.Join(s.Config.StateDir, "account.json")}
+	}
+	if err := s.initWebAuthn(); err != nil {
+		return nil, fmt.Errorf("passkeys: %w", err)
+	}
 	s.pages = map[string]*template.Template{}
 	names, err := fs.Glob(assets, "templates/*.html")
 	if err != nil {
@@ -126,6 +148,10 @@ func (s *Server) Handler() (http.Handler, error) {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok\n")) })
 	mux.HandleFunc("GET /login", s.handleLogin)
 	mux.HandleFunc("POST /login", s.handleLogin)
+	mux.HandleFunc("GET /setup", s.handleSetup)
+	mux.HandleFunc("POST /setup", s.handleSetup)
+	mux.HandleFunc("POST /login/passkey/begin", s.handlePasskeyLoginBegin)
+	mux.HandleFunc("POST /login/passkey/finish", s.handlePasskeyLoginFinish)
 	mux.HandleFunc("POST /hooks/{name}", s.handleWebhook)
 
 	auth := http.NewServeMux()
@@ -147,6 +173,12 @@ func (s *Server) Handler() (http.Handler, error) {
 	auth.HandleFunc("GET /jobs/{id}", s.handleJob)
 	auth.HandleFunc("GET /jobs/{id}/events", s.handleJobEvents)
 	auth.HandleFunc("GET /generations", s.handleGenerations)
+	auth.HandleFunc("GET /account", s.handleAccount)
+	auth.HandleFunc("POST /account/password", s.handleSetPassword)
+	auth.HandleFunc("POST /account/password/delete", s.handleRemovePassword)
+	auth.HandleFunc("POST /account/passkeys/begin", s.handlePasskeyRegisterBegin)
+	auth.HandleFunc("POST /account/passkeys/finish", s.handlePasskeyRegisterFinish)
+	auth.HandleFunc("POST /account/passkeys/{id}/delete", s.handleRemovePasskey)
 	auth.HandleFunc("POST /generations/{n}/rollback", s.handleRollback)
 	mux.Handle("/", s.requireAuth(auth))
 
@@ -279,14 +311,11 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	e := s.quiet()
-	app, err := e.App(name)
-	if err != nil {
+	if _, err := e.App(name); err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	if err = applyForm(app, r); err == nil {
-		err = e.UpdateApp(app)
-	}
+	app, err := e.ModifyApp(name, func(a *appdef.App) error { return applyForm(a, r) })
 	if err != nil {
 		data, derr := s.appData(r, name)
 		if derr != nil {
@@ -487,9 +516,11 @@ func (s *Server) handleAppLogs(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	e := s.quiet()
+	// Unknown apps, apps without a webhook and bad signatures all look the
+	// same, so the endpoint doesn't reveal which apps exist.
 	token, err := e.WebhookToken(name)
 	if err != nil || token == "" {
-		http.NotFound(w, r)
+		http.Error(w, webhook.ErrUnauthorized.Error(), http.StatusUnauthorized)
 		return
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
@@ -521,9 +552,26 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "{\"status\":\"ignored\",\"reason\":%q}\n", d.Ref+" is not "+app.WebhookBranch())
 		return
 	}
+	// A deploy that hasn't started yet will pick up this push too, so
+	// bursts of pushes don't queue one full deploy each.
+	s.hookMu.Lock()
+	if j := s.hookQueued[name]; j != nil {
+		s.hookMu.Unlock()
+		w.WriteHeader(http.StatusAccepted)
+		fmt.Fprintf(w, "{\"status\":\"queued\",\"job\":%d}\n", j.ID)
+		return
+	}
 	j := s.Jobs.Start("Deploy "+name+" (webhook from "+d.Provider+")", name, func(ctx context.Context, j *Job) error {
-		return s.engine(j).Deploy(ctx, name)
+		e := s.engine(j)
+		e.OnDeployStart = func() { s.dequeueHook(name, j) }
+		defer s.dequeueHook(name, j)
+		return e.Deploy(ctx, name)
 	})
+	if s.hookQueued == nil {
+		s.hookQueued = map[string]*Job{}
+	}
+	s.hookQueued[name] = j
+	s.hookMu.Unlock()
 	log.Printf("webhook: %s push %s: deploying %s as job %d", d.Provider, d.Ref, name, j.ID)
 	w.WriteHeader(http.StatusAccepted)
 	fmt.Fprintf(w, "{\"status\":\"deploying\",\"job\":%d}\n", j.ID)
@@ -603,6 +651,7 @@ func applyForm(app *appdef.App, r *http.Request) error {
 	app.Package = strings.TrimSpace(r.FormValue("package"))
 	app.Command = strings.TrimSpace(r.FormValue("command"))
 	app.PreStart = strings.TrimSpace(r.FormValue("pre_start"))
+	app.PreStartTimeout = strings.TrimSpace(r.FormValue("pre_start_timeout"))
 	app.Path = strings.Fields(r.FormValue("path"))
 	app.Domains = strings.Fields(r.FormValue("domains"))
 
@@ -625,7 +674,7 @@ func applyForm(app *appdef.App, r *http.Request) error {
 		if app.Env == nil {
 			app.Env = map[string]string{}
 		}
-		app.Env[strings.TrimSpace(k)] = v
+		app.Env[strings.TrimSpace(k)] = strings.TrimSpace(v)
 	}
 
 	app.Resources = nil
@@ -667,4 +716,12 @@ func applyForm(app *appdef.App, r *http.Request) error {
 		app.Databases = append(app.Databases, appdef.Database{Kind: "redis"})
 	}
 	return nil
+}
+
+func (s *Server) dequeueHook(app string, j *Job) {
+	s.hookMu.Lock()
+	defer s.hookMu.Unlock()
+	if s.hookQueued[app] == j {
+		delete(s.hookQueued, app)
+	}
 }

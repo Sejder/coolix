@@ -135,7 +135,21 @@ func dbBackup(_ context.Context, args []string) error {
 	if err != nil || keep < 1 {
 		return fmt.Errorf("invalid KEEP %q", args[3])
 	}
-	name := time.Now().UTC().Format("20060102T150405Z") + ".dump"
+	// Leftovers of a killed dump.
+	if stale, _ := filepath.Glob(filepath.Join(dir, ".*.dump.tmp")); len(stale) > 0 {
+		for _, f := range stale {
+			os.Remove(f)
+		}
+	}
+	// Names have one-second resolution; never overwrite an existing dump.
+	var name string
+	for {
+		name = time.Now().UTC().Format("20060102T150405Z") + ".dump"
+		if _, err := os.Lstat(filepath.Join(dir, name)); errors.Is(err, os.ErrNotExist) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 	tmp := filepath.Join(dir, "."+name+".tmp")
 	if err := run1(pkg+"/bin/pg_dump", "-h", sock, "--format=custom", "--file="+tmp, "app"); err != nil {
 		os.Remove(tmp)
@@ -144,8 +158,9 @@ func dbBackup(_ context.Context, args []string) error {
 	if err := os.Rename(tmp, filepath.Join(dir, name)); err != nil {
 		return err
 	}
-	st, _ := os.Stat(filepath.Join(dir, name))
-	fmt.Fprintf(os.Stderr, "backup %s written (%d bytes)\n", name, st.Size())
+	if st, err := os.Stat(filepath.Join(dir, name)); err == nil {
+		fmt.Fprintf(os.Stderr, "backup %s written (%d bytes)\n", name, st.Size())
+	}
 	files, err := query.ListBackups(dir)
 	if err != nil {
 		return err
@@ -165,7 +180,7 @@ func dbRestore(_ context.Context, args []string) error {
 		return errors.New("usage: coolix db-restore POSTGRES_PACKAGE SOCKET_DIR FILE")
 	}
 	pkg, sock, file := args[0], args[1], args[2]
-	if !query.ValidBackupFile(filepath.Base(file)) {
+	if !units.ValidBackupFile(filepath.Base(file)) {
 		return fmt.Errorf("%q is not a coolix backup", filepath.Base(file))
 	}
 	if _, err := os.Stat(file); err != nil {

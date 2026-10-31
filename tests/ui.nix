@@ -17,10 +17,8 @@ in
       enable = true;
       caddy.tls = "off";
       drainTime = "0s";
-      ui = {
-        domain = "coolix.test";
-        adminPasswordFile = pkgs.writeText "pw" "hunter2"; # test only: never put real passwords in the store
-      };
+      # No adminPasswordFile: the account is created on the setup page.
+      ui.domain = "coolix.test";
     };
     networking.hosts."127.0.0.1" = [ "coolix.test" "hello.test" "www.hello.test" "docs.test" ];
 
@@ -52,9 +50,11 @@ in
     machine.wait_for_unit("caddy.service")
     machine.wait_until_succeeds("curl -sf http://coolix.test/healthz")
 
-    with subtest("login is required"):
-        machine.succeed("curl -s -o /dev/null -w '%{redirect_url}' http://coolix.test/ | grep /login")
-        machine.succeed("test $(curl -s -o /dev/null -w '%{http_code}' -d password=nope http://coolix.test/login) = 401")
+    with subtest("a fresh install only offers setup, which needs a code from the host"):
+        machine.succeed("curl -s -o /dev/null -w '%{redirect_url}' http://coolix.test/ | grep /setup")
+        machine.succeed("test $(curl -s -o /dev/null -w '%{http_code}' -d code=AAAA-BBBB-CCCC-DDDD http://coolix.test/setup) = 401")
+        code = machine.succeed("coolix setup-code | awk '/^Setup code:/ {print $3}'").strip()
+        assert len(code) == 19, code
 
     # Some state worth looking at: two deployed apps, one undeployed change.
     machine.succeed("cp -rL /etc/coolix-test-app /srv/hello && cp -rL /etc/coolix-test-app /srv/docs && chmod -R u+w /srv")
@@ -68,7 +68,7 @@ in
     with subtest("deploy from the browser and take screenshots"):
         machine.succeed("mkdir -p /tmp/screenshots")
         machine.succeed(
-            "python3 ${./screenshots.py} /tmp/screenshots "
+            f"python3 ${./screenshots.py} /tmp/screenshots {code} "
             "${pkgs.chromium}/bin/chromium ${pkgs.chromedriver}/bin/chromedriver >&2"
         )
         machine.succeed("curl -sf http://hello.test/ | grep -x v2")

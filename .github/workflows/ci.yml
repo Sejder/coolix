@@ -5,6 +5,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Lets update-flake-lock.yml run CI on its PRs (PRs opened with the
+  # default token don't trigger pull_request workflows).
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   go:

@@ -9,6 +9,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  actions: write
 
 jobs:
   update:
@@ -17,5 +18,11 @@ jobs:
       - uses: actions/checkout@v7
       - uses: cachix/install-nix-action@v31
       - uses: DeterminateSystems/update-flake-lock@v29
+        id: update
         with:
           pr-title: "Update flake.lock"
+      # PRs opened with GITHUB_TOKEN don't trigger CI; workflow_dispatch does.
+      - if: steps.update.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run ci.yml --ref update_flake_lock_action
