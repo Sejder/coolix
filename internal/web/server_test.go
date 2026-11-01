@@ -2,6 +2,9 @@ package web
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/http/cookiejar"
@@ -384,5 +387,51 @@ func TestSaveRejectsDuplicateDomain(t *testing.T) {
 	err := e.CreateApp(&appdef.App{Name: "alpha", Source: "github:me/a", Domains: []string{"X.example.com"}})
 	if err == nil || !strings.Contains(err.Error(), "already used by zeta") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestPullRequestHooksIgnored(t *testing.T) {
+	srv, _, e := newTestServerWithEngine(t)
+	if err := e.CreateApp(&appdef.App{Name: "blog", Source: "github:me/blog"}); err != nil {
+		t.Fatal(err)
+	}
+	token, err := e.EnableWebhook("blog")
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := func(action, headRepo string) string {
+		b := `{"action":"` + action + `","number":3,"pull_request":{"head":{"ref":"f","sha":"` + strings.Repeat("a", 40) +
+			`","repo":{"full_name":"` + headRepo + `"}},"base":{"repo":{"full_name":"me/blog"}}}}`
+		req, _ := http.NewRequest("POST", srv.URL+"/hooks/blog", strings.NewReader(b))
+		req.Header.Set("X-GitHub-Event", "pull_request")
+		m := hmac.New(sha256.New, []byte(token))
+		m.Write([]byte(b))
+		req.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(m.Sum(nil)))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != 202 {
+			t.Errorf("%s: status %d", action, resp.StatusCode)
+		}
+		return body(t, resp)
+	}
+	if got := post("opened", "me/blog"); !strings.Contains(got, "previews are off") {
+		t.Errorf("previews off: %s", got)
+	}
+	if _, err := e.ModifyApp("blog", func(a *appdef.App) error {
+		a.Preview = &appdef.Preview{Enabled: true}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := post("opened", "evil/blog"); !strings.Contains(got, "forks are never deployed") {
+		t.Errorf("fork: %s", got)
+	}
+	if got := post("labeled", "me/blog"); !strings.Contains(got, "ignored") {
+		t.Errorf("labeled: %s", got)
+	}
+	if got := post("closed", "me/blog"); !strings.Contains(got, "no preview") {
+		t.Errorf("closed without preview: %s", got)
 	}
 }

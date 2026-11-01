@@ -284,6 +284,9 @@ func (p Policy) ValidateApps(m *Manifest) map[string]error {
 			out[name] = fmt.Errorf("invalid app name %q (2-20 chars of a-z, 0-9 and -)", name)
 			continue
 		}
+		if app.SecretsFrom != "" && (!ValidName(app.SecretsFrom) || app.SecretsFrom == name) {
+			fail("secrets_from %q: must be another app", app.SecretsFrom)
+		}
 		if !validExe(app.Exe) {
 			fail("exe %q: must be a file inside a store path", app.Exe)
 		}

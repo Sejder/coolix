@@ -233,3 +233,22 @@ func TestDatabasesHaveNoNetwork(t *testing.T) {
 		}
 	}
 }
+
+func TestSecretsFrom(t *testing.T) {
+	m := manifest()
+	pr := m.Apps["blog"]
+	pr.PortBase, pr.Domains, pr.Secrets, pr.SecretsFrom = 20002, []string{"blog-pr1.example.com"}, false, "blog"
+	m.Apps["blog-pr1"] = pr
+	if err := policy.Validate(m); err != nil {
+		t.Fatal(err)
+	}
+	r := Render(m, Options{Exec: "/etc/coolix/coolix", SecretsDir: "/s"})
+	if !strings.Contains(r.Files["coolix-app-blog-pr1@.service"], "LoadCredentialEncrypted=env:/s/blog.cred\n") {
+		t.Errorf("preview doesn't get its parent's secrets:\n%s", r.Files["coolix-app-blog-pr1@.service"])
+	}
+	pr.SecretsFrom = "blog-pr1"
+	m.Apps["blog-pr1"] = pr
+	if err := policy.Validate(m); err == nil || !strings.Contains(err.Error(), "secrets_from") {
+		t.Errorf("self secrets_from: %v", err)
+	}
+}

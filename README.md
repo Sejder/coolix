@@ -42,6 +42,9 @@ deployed is recorded in a git repo.
 - **Deploy on push.** `git push coolix@host:app main` builds and deploys,
   Heroku-style. Or keep the code on your forge, and give it a signed webhook
   URL (GitHub, Gitea, Forgejo, GitLab or any CI job).
+- **Previews.** Pull requests and branches get their own deployment at
+  `blog-pr12.preview.example.com`, with an empty database, removed when the
+  pull request closes. Pull requests from forks never run.
 - **Database backups.** Scheduled or on-demand `pg_dump`s with retention, and
   restores from the UI or CLI.
 - **Resource limits, migrations, runtime packages.** Memory, CPU and task
@@ -128,6 +131,7 @@ coolix db backups APP                      list its dumps
 coolix db restore APP BACKUP               replace the database's contents with a dump
 coolix webhook enable|show|disable APP     manage the app's deploy webhook
 coolix ssh-key add [NAME] < key.pub        allow a key to git push (also: ssh-key list, ssh-key rm NAME)
+coolix preview deploy|list|rm APP …        previews of branches (pull requests deploy through the webhook)
 coolix setup-code                          one-time code to create the UI's admin account
 coolix account reset                       remove the admin's password and passkeys (lost access)
 ```
@@ -170,5 +174,5 @@ CI runs the same commands on GitHub Actions, with KVM for the VM tests.
 
 ## Not yet
 
-PR preview environments, off-host backups, multiple users, and multi-host
-deployments.
+Off-host backups, and managing a fleet of NixOS hosts and their services
+(e.g. `services.immich`) from the UI.

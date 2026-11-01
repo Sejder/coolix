@@ -41,6 +41,8 @@ let
     COOLIX_DEFAULT_MEMORY_MAX = cfg.apps.defaultMemoryMax;
   } // lib.optionalAttrs (cfg.ui.domain != null) {
     COOLIX_UI_DOMAIN = cfg.ui.domain;
+  } // lib.optionalAttrs (cfg.previews.domain != null) {
+    COOLIX_PREVIEW_DOMAIN = cfg.previews.domain;
   } // lib.optionalAttrs cfg.git.enable {
     COOLIX_GIT_HOST = cfg.git.host;
     COOLIX_GIT_PORT = toString cfg.git.port;
@@ -177,6 +179,18 @@ in
         default = false;
         description = "Open ports 80 and 443.";
       };
+    };
+
+    previews.domain = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "preview.example.com";
+      description = ''
+        Previews of branches and pull requests (apps with `[preview] enabled`)
+        are served at `<app>-<branch or prN>.<domain>`, e.g.
+        `blog-pr12.preview.example.com`. Point a wildcard DNS record at the
+        host. Apps can set their own `preview.domain`.
+      '';
     };
 
     git = {

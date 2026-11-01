@@ -73,7 +73,14 @@ func (e *Engine) Status() (*Status, error) {
 	for _, s := range byName {
 		st.Apps = append(st.Apps, *s)
 	}
-	sort.Slice(st.Apps, func(i, j int) bool { return st.Apps[i].Name < st.Apps[j].Name })
+	// Previews right after their parent.
+	key := func(a AppStatus) string {
+		if a.Def != nil && a.Def.PreviewOf != "" {
+			return a.Def.PreviewOf + "\x00" + a.Name
+		}
+		return a.Name
+	}
+	sort.Slice(st.Apps, func(i, j int) bool { return key(st.Apps[i]) < key(st.Apps[j]) })
 
 	if r, err := e.Repo(); err == nil {
 		st.HeadRev, _ = r.Head()

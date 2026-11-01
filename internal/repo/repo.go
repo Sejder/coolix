@@ -40,7 +40,7 @@ func (r *Repo) GenerateFlake(apps []*appdef.App, skip []string) string {
 		}
 		src := a.Source
 		if a.Pushed() {
-			src = gitpush.FlakeURL(gitpush.Dir(r.GitDir, a.Name), a.DeployBranch())
+			src = gitpush.FlakeURL(gitpush.Dir(r.GitDir, a.PushRepo()), a.DeployBranch())
 		}
 		fmt.Fprintf(&b, "    app-%s.url = \"%s\";\n", a.Name, src)
 		if a.FollowsNixpkgs() {
@@ -102,7 +102,7 @@ func (r *Repo) Sync() ([]*appdef.App, error) {
 func (r *Repo) Unpushed(apps []*appdef.App) []string {
 	var out []string
 	for _, a := range apps {
-		if a.Pushed() && !gitpush.HasBranch(gitpush.Dir(r.GitDir, a.Name), a.DeployBranch()) {
+		if a.Pushed() && !gitpush.HasBranch(gitpush.Dir(r.GitDir, a.PushRepo()), a.DeployBranch()) {
 			out = append(out, a.Name)
 		}
 	}

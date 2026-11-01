@@ -7,6 +7,7 @@
       {{range .App.Domains}}<a class="domain" href="https://{{.}}" target="_blank" rel="noopener">{{.}}</a> {{end}}
       <code class="src">{{.App.Source}}</code>
     </p>
+    {{if .Parent}}<p class="sub">Preview of <a href="/apps/{{.Parent}}">{{.Parent}}</a> · {{.App.PreviewRef}}</p>{{end}}
   </div>
   <div class="actions">
     <form method="post" action="/apps/{{.App.Name}}/deploy"><button class="primary">Deploy</button></form>
@@ -14,11 +15,19 @@
 </div>
 
 <div class="grid">
+  {{if .Parent}}
+  <div class="card form">
+    <h2>Settings</h2>
+    <p class="muted small">A preview takes its settings from <a href="/apps/{{.Parent}}">{{.Parent}}</a> each time it's deployed.</p>
+    <fieldset disabled class="readonly">{{template "appfields" .App}}</fieldset>
+  </div>
+  {{else}}
   <form method="post" action="/apps/{{.App.Name}}" class="card form">
     <h2>Settings</h2>
     {{template "appfields" .App}}
     <div class="formactions"><button>Save</button></div>
   </form>
+  {{end}}
 
   <div class="side">
     <section class="card">
@@ -39,6 +48,30 @@
       </form>
     </section>
 
+    {{if .Parent}}
+    <section class="card">
+      <h2>Preview</h2>
+      <p class="small">Shows <code>{{.App.PreviewRef}}</code> of <a href="/apps/{{.Parent}}">{{.Parent}}</a>, with its own empty databases{{if .App.PreviewSecrets}} and {{.Parent}}'s secrets{{end}}. It's removed when the pull request closes or the branch is deleted.</p>
+      <form method="post" action="/apps/{{.Parent}}/previews/{{.App.Name}}/delete" hx-confirm="Remove preview {{.App.Name}} and delete its data?"><button class="danger">Remove preview</button></form>
+    </section>
+    {{else}}
+    {{if .App.PreviewsEnabled}}
+    <section class="card">
+      <h2>Previews</h2>
+      <ul class="secrets">
+        {{range .Previews}}
+        <li><span><a href="/apps/{{.Name}}">{{.Name}}</a> {{template "slot" .}} {{range .Domains}}<a class="domain small" href="https://{{.}}" target="_blank" rel="noopener">{{.}}</a>{{end}}</span>
+          <form method="post" action="/apps/{{$.App.Name}}/previews/{{.Name}}/delete" hx-confirm="Remove preview {{.Name}} and delete its data?"><button class="link danger">Remove</button></form></li>
+        {{else}}
+        <li class="muted">No previews. Pull requests (with the webhook){{if .App.Pushed}} and pushes to other branches{{end}} get one automatically.</li>
+        {{end}}
+      </ul>
+      <form method="post" action="/apps/{{.App.Name}}/previews" class="inline">
+        <input name="branch" placeholder="branch" required spellcheck="false" aria-label="Branch to preview">
+        <button>Deploy preview</button>
+      </form>
+    </section>
+    {{end}}
     {{if .App.Pushed}}
     <section class="card">
       <h2>Push to deploy</h2>
@@ -72,6 +105,7 @@ git push coolix {{.App.DeployBranch}}</code></pre>
         {{if .Webhook}}<form method="post" action="/apps/{{.App.Name}}/webhook"><input type="hidden" name="action" value="disable"><button class="link danger">Disable</button></form>{{end}}
       </div>
     </section>
+    {{end}}
     {{end}}
 
     {{if hasDB .App "postgres"}}

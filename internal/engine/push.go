@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -29,7 +30,7 @@ type Push struct {
 // deploy branch deploys it, with the output going to the pusher.
 func (e *Engine) ServeGit(ctx context.Context, p Push) error {
 	app, err := e.App(p.Command.App)
-	if err != nil || !app.Pushed() {
+	if err != nil || !app.Pushed() || app.IsPreview() {
 		return fmt.Errorf("there is no push app %q; create one with source \"push\" (coolix app add %s --source push)", p.Command.App, p.Command.App)
 	}
 	dir := gitpush.Dir(e.GitDir(), app.Name)
@@ -57,29 +58,36 @@ func (e *Engine) ServeGit(ctx context.Context, p Push) error {
 		return err
 	}
 	changes := gitpush.Changes(before, after)
-	deploy := false
-	for _, c := range changes {
-		if c.Rev == "" {
-			continue
-		}
-		if err := gitpush.Pin(dir, c.Rev); err != nil {
-			return err
-		}
-		if c.Branch == app.DeployBranch() {
-			deploy = true
-		}
-	}
 	if len(changes) > 0 {
 		e.logf("%s pushed to %s: %v", p.Who, app.Name, changes)
 	}
-	if !deploy {
-		if len(changes) > 0 {
-			e.logf("only pushes to %s deploy %s", app.DeployBranch(), app.Name)
+	var errs []error
+	for _, c := range changes {
+		switch {
+		case c.Rev == "":
+			// A deleted branch takes its preview with it.
+			if name, ok := e.FindPreview(app.Name, c.Branch); ok {
+				e.logf("removing preview %s", name)
+				errs = append(errs, e.RemovePreview(ctx, app.Name, name))
+			}
+			continue
+		case gitpush.Pin(dir, c.Rev) != nil:
+			return fmt.Errorf("keeping %s", c.Rev)
+		case c.Branch == app.DeployBranch():
+			e.logf("deploying %s (%s)", app.Name, ShortRev(c.Rev))
+			errs = append(errs, e.Deploy(ctx, app.Name))
+		case app.PreviewsEnabled():
+			pv := Preview{Parent: app.Name, Branch: c.Branch}
+			err := e.DeployPreview(ctx, pv)
+			if err == nil {
+				e.logf("preview of %s: %s.%s", c.Branch, pv.Name(), e.previewDomain(app))
+			}
+			errs = append(errs, err)
+		default:
+			e.logf("only pushes to %s deploy %s (pushes to other branches deploy previews if you turn them on)", app.DeployBranch(), app.Name)
 		}
-		return nil
 	}
-	e.logf("deploying %s (%s)", app.Name, ShortRev(after[app.DeployBranch()]))
-	return e.Deploy(ctx, app.Name)
+	return errors.Join(errs...)
 }
 
 // initPushRepo creates a push app's bare repo, so it can be pushed to.

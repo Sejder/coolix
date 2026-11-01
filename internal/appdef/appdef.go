@@ -84,6 +84,15 @@ type App struct {
 	Backup    *Backup           `toml:"backup,omitempty"`
 	Webhook   *Webhook          `toml:"webhook,omitempty"`
 	Hardening map[string]any    `toml:"hardening,omitempty"`
+	// Preview settings of a parent app (previews of branches and PRs).
+	Preview *Preview `toml:"preview,omitempty"`
+	// PreviewOf and PreviewRef mark a preview: its parent app, and the
+	// branch ("feature-x") or pull request ("pr-12") it shows. Previews are
+	// regenerated from their parent; don't edit them.
+	PreviewOf  string `toml:"preview_of,omitempty"`
+	PreviewRef string `toml:"preview_ref,omitempty"`
+	// PreviewSecrets gives a preview its parent's secrets ([preview] secrets).
+	PreviewSecrets bool `toml:"preview_secrets,omitempty"`
 }
 
 // HasDatabase reports whether the app has a database of kind.
@@ -249,6 +258,7 @@ func (a *App) Validate() error {
 	if err := units.CheckHardening(a.Hardening); err != nil {
 		errs = append(errs, err)
 	}
+	errs = append(errs, a.validatePreview()...)
 	return errors.Join(errs...)
 }
 

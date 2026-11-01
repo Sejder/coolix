@@ -22,7 +22,7 @@
 {{template "advancedfields" .}}
 {{end}}
 {{define "advancedfields"}}
-<details class="advanced" {{if or .PreStart .Path .Resources .Backup .Branch}}open{{end}}>
+<details class="advanced" {{if or .PreStart .Path .Resources .Backup .Branch .Preview}}open{{end}}>
   <summary>Advanced</summary>
   <div class="row">
     <label>Pre-start command <small>runs before each start, e.g. migrations</small>
@@ -43,5 +43,16 @@
     <label>Backups to keep<input name="backup_keep" value="{{with .Backup}}{{if .Keep}}{{.Keep}}{{end}}{{end}}" placeholder="7" inputmode="numeric"></label>
     <label>Deploy branch <small>webhooks and git push</small><input name="branch" value="{{.Branch}}" placeholder="{{if .Pushed}}main{{else}}any{{end}}" spellcheck="false"></label>
   </div>
+  {{if not .IsPreview}}
+  <fieldset>
+    <legend>Previews <small>branches and pull requests, each at its own domain with its own empty databases</small></legend>
+    <label class="check"><input type="checkbox" name="preview_enabled" value="1" {{if .PreviewsEnabled}}checked{{end}}> Deploy previews <small>of pull requests (webhook), pushed branches and branches you pick</small></label>
+    <div class="row three">
+      <label>Preview domain <small>default: the host's</small><input name="preview_domain" value="{{with .Preview}}{{.Domain}}{{end}}" placeholder="preview.example.com" spellcheck="false"></label>
+      <label>Previews at once<input name="preview_max" value="{{with .Preview}}{{if .Max}}{{.Max}}{{end}}{{end}}" placeholder="5" inputmode="numeric"></label>
+    </div>
+    <label class="check"><input type="checkbox" name="preview_secrets" value="1" {{with .Preview}}{{if .Secrets}}checked{{end}}{{end}}> Give previews this app's secrets <small>their code comes from branches and pull requests</small></label>
+  </fieldset>
+  {{end}}
 </details>
 {{end}}

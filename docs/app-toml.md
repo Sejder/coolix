@@ -44,6 +44,12 @@ tasks_max = 256                     # TasksMax: processes + threads
 schedule = "daily"                  # systemd calendar expression, e.g. "*-*-* 03:00"
 keep = 7                            # newest dumps to keep (default 7)
 
+[preview]                           # previews of branches and pull requests (see below)
+enabled = true
+domain = "preview.example.com"      # default: services.coolix.previews.domain
+secrets = false                     # give previews this app's secrets (default: no)
+max = 5                             # previews at once
+
 [hardening]                         # relax individual sandbox settings
 MemoryDenyWriteExecute = false      # e.g. for JIT runtimes (Node, Java, .NET)
 ```
@@ -103,3 +109,27 @@ or `coolix ssh-key add`. The pushed code lives in
 
 The older `[webhook] branch = "..."` still works, and becomes `branch` the
 next time coolix saves the app.
+
+## Previews
+
+With `[preview] enabled = true`, branches and pull requests of an app can be
+deployed next to it, each as its own app: `blog-pr12.preview.example.com`
+for pull request 12, `blog-feature-x.preview.example.com` for a branch.
+
+- **Pull requests** deploy through the app's webhook: opening one or pushing
+  to it deploys its preview, and closing or merging it removes the preview.
+  Add the pull/merge request event to the webhook (GitHub and Forgejo/Gitea:
+  "Pull requests"; GitLab: "Merge request events"). Pull requests from forks
+  are never deployed: their code comes from people without push access.
+- **Push apps:** `git push coolix feature-x` deploys a preview of
+  `feature-x`, and `git push coolix :feature-x` removes it.
+- **By hand:** "Deploy preview" on the app's page, or
+  `coolix preview deploy blog feature-x`.
+
+A preview gets the app's settings as of when it's deployed, its own ports
+and its own empty databases (`pre_start` runs as usual, so migrations
+apply). It doesn't get the app's secrets unless `secrets = true`: its code
+comes from a branch, not from what you've reviewed. Removing a preview
+deletes its data. Previews are listed in `apps/<app>-<…>/app.toml` like other
+apps, with `preview_of` and `preview_ref`; coolix rewrites those files, so
+don't edit them.

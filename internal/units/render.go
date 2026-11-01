@@ -259,7 +259,9 @@ func renderApp(name string, app App, dbUnits []string, o Options) string {
 	u.set("StateDirectory", "coolix-apps/"+name)
 	u.set("WorkingDirectory", "%S/coolix-apps/"+name)
 	u.set("SyslogIdentifier", "coolix-"+name)
-	if app.Secrets {
+	if app.SecretsFrom != "" {
+		u.set("LoadCredentialEncrypted", "env:"+o.SecretsDir+"/"+app.SecretsFrom+".cred")
+	} else if app.Secrets {
 		u.set("LoadCredentialEncrypted", "env:"+o.SecretsDir+"/"+name+".cred")
 	}
 	res := app.Resources

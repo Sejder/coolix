@@ -217,6 +217,13 @@ func (e *Engine) HandleControl(ctx context.Context, r control.Request, w io.Writ
 		return root.runDBJob(ctx, r.Arg, units.BackupUnit(r.Arg))
 	case "restore":
 		return root.runDBJob(ctx, r.Arg, units.RestoreInstance(r.Arg, r.File))
+	case "purge":
+		l, err := lock.Acquire(activateLock, "an activation", w)
+		if err != nil {
+			return err
+		}
+		defer l.Release()
+		return root.purge(r.Arg, w)
 	}
 	return fmt.Errorf("unknown request %q", r.Verb)
 }

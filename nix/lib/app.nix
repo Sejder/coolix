@@ -35,6 +35,8 @@ let
     backup = def.backup or { };
   } // lib.optionalAttrs (def ? pre_start) {
     pre_start = "${pkg}/${def.pre_start}";
+  } // lib.optionalAttrs (def.preview_secrets or false) {
+    secrets_from = def.preview_of;
   } // lib.optionalAttrs (def ? pre_start_timeout) {
     inherit (def) pre_start_timeout;
   };

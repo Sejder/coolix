@@ -27,6 +27,9 @@ type appFlags struct {
 	memoryMax, cpuQuota             *string
 	tasksMax, backupKeep            *int
 	backupSchedule, branch          *string
+	preview, previewDomain          *string
+	previewSecrets                  *string
+	previewMax                      *int
 	domains, envs, unsetEnvs, paths multiFlag
 	dbs                             multiFlag
 }
@@ -45,6 +48,10 @@ func newAppFlags(name string) *appFlags {
 	f.backupKeep = f.fs.Int("backup-keep", 0, "postgres backups to keep (default 7)")
 	f.branch = f.fs.String("branch", "", "branch whose pushes deploy the app, by webhook or git push (default: any; push apps: main)")
 	f.fs.StringVar(f.branch, "webhook-branch", "", "old name of --branch")
+	f.preview = f.fs.String("preview", "", "on|off: deploy previews of pull requests and branches")
+	f.previewDomain = f.fs.String("preview-domain", "", "serve previews at <preview>.<domain> (default: the host's previews.domain)")
+	f.previewSecrets = f.fs.String("preview-secrets", "", "on|off: give previews this app's secrets (default off)")
+	f.previewMax = f.fs.Int("preview-max", 0, "previews at once (default 5)")
 	f.fs.Var(&f.paths, "path", "nixpkgs attribute to put on the app's PATH (repeatable; replaces existing; \"none\" clears)")
 	f.healthPath = f.fs.String("health-path", "", "HTTP path that returns < 400 when the app is ready (default: TCP check)")
 	f.healthTimeout = f.fs.String("health-timeout", "", "how long a new slot may take to become healthy (default 30s)")
@@ -114,6 +121,40 @@ func (f *appFlags) apply(app *appdef.App) error {
 	}
 	if set["branch"] || set["webhook-branch"] {
 		app.Branch, app.Webhook = *f.branch, nil
+	}
+	if set["preview"] || set["preview-domain"] || set["preview-secrets"] || set["preview-max"] {
+		if app.Preview == nil {
+			app.Preview = &appdef.Preview{}
+		}
+		onOff := func(flag, v string) (bool, error) {
+			switch v {
+			case "on":
+				return true, nil
+			case "off":
+				return false, nil
+			}
+			return false, fmt.Errorf("--%s %q: want on or off", flag, v)
+		}
+		var err error
+		if set["preview"] {
+			if app.Preview.Enabled, err = onOff("preview", *f.preview); err != nil {
+				return err
+			}
+		}
+		if set["preview-secrets"] {
+			if app.Preview.Secrets, err = onOff("preview-secrets", *f.previewSecrets); err != nil {
+				return err
+			}
+		}
+		if set["preview-domain"] {
+			app.Preview.Domain = *f.previewDomain
+		}
+		if set["preview-max"] {
+			app.Preview.Max = *f.previewMax
+		}
+		if *app.Preview == (appdef.Preview{}) {
+			app.Preview = nil
+		}
 	}
 	if set["domain"] {
 		app.Domains = f.domains

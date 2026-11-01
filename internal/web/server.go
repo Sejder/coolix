@@ -48,6 +48,7 @@ type Server struct {
 
 	hookMu     sync.Mutex
 	hookQueued map[string]*Job // webhook deploys waiting for the deploy lock
+	previews   previewJobs
 
 	pages map[string]*template.Template
 }
@@ -172,6 +173,8 @@ func (s *Server) Handler() (http.Handler, error) {
 	auth.HandleFunc("POST /apps/{name}/webhook", s.handleWebhookSettings)
 	auth.HandleFunc("POST /apps/{name}/backups", s.handleBackup)
 	auth.HandleFunc("POST /apps/{name}/backups/{file}/restore", s.handleRestore)
+	auth.HandleFunc("POST /apps/{name}/previews", s.handleDeployPreview)
+	auth.HandleFunc("POST /apps/{name}/previews/{preview}/delete", s.handleRemovePreview)
 	auth.HandleFunc("GET /jobs/{id}", s.handleJob)
 	auth.HandleFunc("GET /jobs/{id}/events", s.handleJobEvents)
 	auth.HandleFunc("GET /generations", s.handleGenerations)
@@ -348,6 +351,17 @@ func (s *Server) appData(r *http.Request, name string) (map[string]any, error) {
 		"WebhookURL": webhookURL(r, name),
 		"PushRemote": s.Config.PushRemote(name),
 	}
+	if app.IsPreview() {
+		data["Parent"] = app.PreviewOf
+	} else if app.PreviewsEnabled() {
+		previews := []engine.AppStatus{}
+		for _, a := range st.Apps {
+			if a.Def != nil && a.Def.PreviewOf == name {
+				previews = append(previews, a)
+			}
+		}
+		data["Previews"] = previews
+	}
 	if app.Pushed() {
 		repo, err := e.Repo()
 		if err != nil {
@@ -377,8 +391,11 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	e := s.quiet()
-	if _, err := e.App(name); err != nil {
+	if a, err := e.App(name); err != nil {
 		http.NotFound(w, r)
+		return
+	} else if a.IsPreview() {
+		s.redirect(w, r, "/apps/"+name, "Previews take their settings from "+a.PreviewOf+"; change them there.")
 		return
 	}
 	app, err := e.ModifyApp(name, func(a *appdef.App) error { return applyForm(a, r) })
@@ -608,6 +625,9 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	case d.Ping():
 		fmt.Fprintln(w, `{"status":"pong"}`)
 		return
+	case d.PR != nil:
+		s.handlePRHook(w, app, d)
+		return
 	case !d.Push():
 		w.WriteHeader(http.StatusAccepted)
 		fmt.Fprintf(w, "{\"status\":\"ignored\",\"reason\":%q}\n", "event "+d.Event)
@@ -765,6 +785,19 @@ func applyForm(app *appdef.App, r *http.Request) error {
 	}
 
 	app.Branch, app.Webhook = strings.TrimSpace(r.FormValue("branch")), nil
+
+	app.Preview = nil
+	if r.FormValue("preview_enabled") != "" {
+		p := appdef.Preview{Enabled: true, Domain: strings.TrimSpace(r.FormValue("preview_domain")), Secrets: r.FormValue("preview_secrets") != ""}
+		if v := strings.TrimSpace(r.FormValue("preview_max")); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				return fmt.Errorf("previews at once %q: want a number", v)
+			}
+			p.Max = n
+		}
+		app.Preview = &p
+	}
 
 	app.Databases = nil
 	if r.FormValue("db_postgres") != "" {

@@ -78,7 +78,7 @@ func (e *Engine) save(app *appdef.App, msg string) error {
 		return err
 	}
 	if app.Pushed() {
-		if err := e.initPushRepo(app.Name); err != nil {
+		if err := e.initPushRepo(app.PushRepo()); err != nil {
 			return err
 		}
 	}
@@ -105,6 +105,20 @@ func (e *Engine) RemoveApp(name string) error {
 	if err := r.RemoveApp(name); err != nil {
 		return err
 	}
+	// Its previews go with it.
+	apps, err := appdef.LoadAll(r.Dir)
+	if err != nil {
+		return err
+	}
+	var previews []string
+	for _, a := range apps {
+		if a.PreviewOf == name {
+			if err := r.RemoveApp(a.Name); err != nil {
+				return err
+			}
+			previews = append(previews, a.Name)
+		}
+	}
 	if _, err := r.Sync(); err != nil {
 		return err
 	}
@@ -113,6 +127,11 @@ func (e *Engine) RemoveApp(name string) error {
 	}
 	if err := e.removePushRepo(name); err != nil {
 		return err
+	}
+	for _, p := range previews {
+		if err := e.DisableWebhook(p); err != nil {
+			return err
+		}
 	}
 	return e.DisableWebhook(name)
 }

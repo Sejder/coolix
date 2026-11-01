@@ -52,7 +52,7 @@ func Parse(line string) (Request, error) {
 	switch {
 	case len(f) == 2 && f[0] == "activate" && profileRe.MatchString(f[1]):
 		return Request{Verb: f[0], Arg: f[1]}, nil
-	case len(f) == 2 && f[0] == "backup" && units.ValidName(f[1]):
+	case len(f) == 2 && (f[0] == "backup" || f[0] == "purge") && units.ValidName(f[1]):
 		return Request{Verb: f[0], Arg: f[1]}, nil
 	case len(f) == 3 && f[0] == "restore" && units.ValidName(f[1]) && units.ValidBackupFile(f[2]):
 		return Request{Verb: f[0], Arg: f[1], File: f[2]}, nil

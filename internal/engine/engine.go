@@ -53,6 +53,8 @@ type Config struct {
 	// GitHost and GitPort are where `git push` reaches this host over SSH
 	// (empty: push deploys are off).
 	GitHost, GitPort string
+	// PreviewDomain: previews are served at <preview>.<PreviewDomain>.
+	PreviewDomain string
 }
 
 func envOr(k, def string) string {
@@ -85,6 +87,7 @@ func ConfigFromEnv() (*Config, error) {
 		DefaultResources: units.Resources{MemoryMax: os.Getenv("COOLIX_DEFAULT_MEMORY_MAX")},
 		GitHost:          os.Getenv("COOLIX_GIT_HOST"),
 		GitPort:          os.Getenv("COOLIX_GIT_PORT"),
+		PreviewDomain:    os.Getenv("COOLIX_PREVIEW_DOMAIN"),
 	}
 	var err error
 	ints := []struct {

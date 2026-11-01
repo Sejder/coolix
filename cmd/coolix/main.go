@@ -31,7 +31,8 @@ commands:
                                --health-path, --health-timeout, --package, --command, --pre-start, --pre-start-timeout,
                                --path ATTR (repeatable), --memory-max, --cpu-quota, --tasks-max,
                                --db postgres[:VERSION] / --db redis / --db none,
-                               --backup-schedule, --backup-keep, --branch
+                               --backup-schedule, --backup-keep, --branch,
+                               --preview on|off, --preview-domain, --preview-secrets on|off, --preview-max
   app rm NAME                  remove an app (applied on next deploy)
   app list                     list apps
   secret set APP KEY           set a secret (value read from stdin; applied on next deploy)
@@ -48,6 +49,9 @@ commands:
   webhook enable APP           create (or rotate) the app's deploy webhook token and print it
   webhook show APP             print the webhook URL path and token
   webhook disable APP          turn the app's webhook off
+  preview deploy APP BRANCH    deploy a branch as a preview (APP needs --preview on)
+  preview list APP             list an app's previews
+  preview rm APP PREVIEW       remove a preview and delete its data
   ssh-key add [NAME] < KEY     allow an SSH public key to git push (push apps: --source push)
   ssh-key list                 list the SSH keys added here (keys from NixOS aren't shown)
   ssh-key rm NAME              remove an SSH key
@@ -123,6 +127,8 @@ func run(ctx context.Context, args []string) error {
 		return runWebhook(e, args[1:])
 	case "ssh-key":
 		return runSSHKey(e, args[1:])
+	case "preview":
+		return runPreview(ctx, e, args[1:])
 	case "ssh-serve":
 		return sshServe(ctx, e)
 	case "rollback":

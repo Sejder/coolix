@@ -223,3 +223,9 @@ pre.command code { background: none; padding: 0; color: inherit; }
 .tablewrap table { min-width: 640px; }
 div.check { display: flex; align-items: center; gap: 9px; margin-bottom: 10px; }
 div.check label.check { margin: 0; }
+
+/* Previews sit under their app in the dashboard. */
+table.apps tr.preview td:first-child { padding-left: 30px; position: relative; }
+table.apps tr.preview td:first-child::before { content: "↳"; position: absolute; left: 14px; color: var(--muted); }
+fieldset.readonly { border: 0; margin: 0; padding: 0; }
+fieldset.readonly :is(input, textarea) { opacity: .75; }

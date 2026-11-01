@@ -19,6 +19,7 @@ All options live under `services.coolix`.
 | `caddy.tls` | `"acme"` | `acme` (automatic HTTPS), `internal` (Caddy's local CA) or `off` (plain HTTP). |
 | `caddy.acmeEmail` | `null` | Contact email for ACME. |
 | `caddy.openFirewall` | `false` | Open ports 80 and 443. |
+| `previews.domain` | `null` | Previews of branches and pull requests are served at `<app>-<branch or prN>.<domain>` (needs a wildcard DNS record). Apps can set their own `preview.domain`. |
 | `git.enable` | `false` | Deploy push apps (`source = "push"`) with `git push coolix@host:APP`. Needs `services.openssh`. Logins of the `coolix` user can only push and fetch: sshd forces `coolix ssh-serve`, with no terminal and no forwarding. |
 | `git.host` / `git.port` | `ui.domain` or the host name / the first `services.openssh.ports` | Shown in push remotes. |
 | `git.authorizedKeys` | `[]` | SSH public keys that may push to every push app. More can be added in the UI or with `coolix ssh-key add`. |

@@ -24,8 +24,8 @@
   <thead><tr><th>App</th><th>Status</th><th>Domains</th><th>Source</th><th></th></tr></thead>
   <tbody>
   {{range .Apps}}
-    <tr>
-      <td><a class="appname" href="/apps/{{.Name}}">{{.Name}}</a></td>
+    <tr{{with .Def}}{{if .IsPreview}} class="preview"{{end}}{{end}}>
+      <td><a class="appname" href="/apps/{{.Name}}">{{.Name}}</a>{{with .Def}}{{if .IsPreview}} <span class="muted small">{{.PreviewRef}}</span>{{end}}{{end}}</td>
       <td>{{template "slot" .}}</td>
       <td>{{range .Domains}}<a class="domain" href="https://{{.}}" target="_blank" rel="noopener">{{.}}</a> {{else}}<span class="muted">—</span>{{end}}</td>
       <td>{{with .Def}}<code class="src">{{.Source}}</code>{{else}}<span class="muted">removed</span>{{end}}</td>

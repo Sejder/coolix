@@ -81,3 +81,58 @@ func TestFormPayloadAndUnknownRef(t *testing.T) {
 		t.Fatal("unknown ref must not match a branch filter")
 	}
 }
+
+func TestPullRequests(t *testing.T) {
+	const sha = "0123456789abcdef0123456789abcdef01234567"
+	gh := func(action, headRepo string) string {
+		head := `null`
+		if headRepo != "" {
+			head = `{"full_name":"` + headRepo + `"}`
+		}
+		return `{"action":"` + action + `","number":7,"pull_request":{"head":{"ref":"feat","sha":"` + sha + `","repo":` + head + `},"base":{"repo":{"full_name":"me/app"}}}}`
+	}
+	gl := func(action string, src int) string {
+		return `{"object_attributes":{"iid":3,"action":"` + action + `","source_branch":"feat","source_project_id":` +
+			string(rune('0'+src)) + `,"target_project_id":1,"last_commit":{"id":"` + sha + `"}}}`
+	}
+	for _, c := range []struct {
+		name    string
+		headers map[string]string
+		body    string
+		want    PullRequest
+	}{
+		{"github opened", map[string]string{"X-GitHub-Event": "pull_request"}, gh("opened", "me/app"), PullRequest{"update", 7, "feat", sha, false}},
+		{"github synchronize", map[string]string{"X-GitHub-Event": "pull_request"}, gh("synchronize", "Me/App"), PullRequest{"update", 7, "feat", sha, false}},
+		{"github fork", map[string]string{"X-GitHub-Event": "pull_request"}, gh("opened", "evil/app"), PullRequest{"update", 7, "feat", sha, true}},
+		{"github deleted fork", map[string]string{"X-GitHub-Event": "pull_request"}, gh("opened", ""), PullRequest{"update", 7, "feat", sha, true}},
+		{"github closed", map[string]string{"X-GitHub-Event": "pull_request"}, gh("closed", "me/app"), PullRequest{"close", 7, "feat", sha, false}},
+		{"github labeled", map[string]string{"X-GitHub-Event": "pull_request"}, gh("labeled", "me/app"), PullRequest{"", 7, "feat", sha, false}},
+		{"forgejo", map[string]string{"X-Forgejo-Event": "pull_request"}, gh("synchronized", "me/app"), PullRequest{"update", 7, "feat", sha, false}},
+		{"gitlab open", map[string]string{"X-Gitlab-Event": "Merge Request Hook"}, gl("open", 1), PullRequest{"update", 3, "feat", sha, false}},
+		{"gitlab merge", map[string]string{"X-Gitlab-Event": "Merge Request Hook"}, gl("merge", 1), PullRequest{"close", 3, "feat", sha, false}},
+		{"gitlab fork", map[string]string{"X-Gitlab-Event": "Merge Request Hook"}, gl("update", 2), PullRequest{"update", 3, "feat", sha, true}},
+	} {
+		h := http.Header{}
+		for k, v := range c.headers {
+			h.Set(k, v)
+		}
+		switch {
+		case h.Get("X-GitHub-Event") != "":
+			h.Set("X-Hub-Signature-256", "sha256="+sign(c.body))
+		case h.Get("X-Forgejo-Event") != "":
+			h.Set("X-Forgejo-Signature", sign(c.body))
+		default:
+			h.Set("X-Gitlab-Token", token)
+		}
+		d, err := Verify(h, []byte(c.body), token)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if d.PR == nil || *d.PR != c.want {
+			t.Errorf("%s: got %+v, want %+v", c.name, d.PR, c.want)
+		}
+		if d.Push() {
+			t.Errorf("%s: a pull request is not a push", c.name)
+		}
+	}
+}

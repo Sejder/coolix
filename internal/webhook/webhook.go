@@ -21,6 +21,21 @@ type Delivery struct {
 	Provider string // github, gitea, forgejo, gitlab, bearer
 	Event    string // as reported by the forge
 	Ref      string // pushed ref, e.g. refs/heads/main; "" if unknown
+	// PR is set for pull/merge request events.
+	PR *PullRequest
+}
+
+// PullRequest is what previews need from a pull (or merge) request event.
+type PullRequest struct {
+	// Action is "update" (opened, reopened or new commits), "close" (closed
+	// or merged) or "" (anything else, e.g. a label change).
+	Action string
+	Number int
+	Branch string // the head branch
+	Rev    string // the head commit
+	// Fork: the head branch lives in another repository, so the code is
+	// from someone without push access. Never deployed.
+	Fork bool
 }
 
 // Push reports whether the delivery is a push (the only event that deploys).
@@ -93,18 +108,94 @@ func Verify(h http.Header, body []byte, token string) (*Delivery, error) {
 		d.Provider, d.Event = "bearer", "push"
 	}
 	d.Ref = ref(h, body)
+	d.PR = pullRequest(d, payload(h, body))
 	return d, nil
+}
+
+func payload(h http.Header, body []byte) []byte {
+	if strings.HasPrefix(h.Get("Content-Type"), "application/x-www-form-urlencoded") {
+		if form, err := url.ParseQuery(string(body)); err == nil {
+			return []byte(form.Get("payload"))
+		}
+	}
+	return body
+}
+
+// pullRequest parses GitHub, Gitea and Forgejo pull_request events and
+// GitLab merge request events.
+func pullRequest(d *Delivery, body []byte) *PullRequest {
+	switch {
+	case d.Event == "pull_request" && d.Provider != "gitlab" && d.Provider != "bearer":
+		var p struct {
+			Action      string `json:"action"`
+			Number      int    `json:"number"`
+			PullRequest struct {
+				Head struct {
+					Ref  string `json:"ref"`
+					Sha  string `json:"sha"`
+					Repo *struct {
+						FullName string `json:"full_name"`
+					} `json:"repo"`
+				} `json:"head"`
+				Base struct {
+					Repo *struct {
+						FullName string `json:"full_name"`
+					} `json:"repo"`
+				} `json:"base"`
+			} `json:"pull_request"`
+		}
+		if json.Unmarshal(body, &p) != nil || p.Number <= 0 {
+			return nil
+		}
+		head, base := p.PullRequest.Head, p.PullRequest.Base
+		pr := &PullRequest{
+			Number: p.Number, Branch: head.Ref, Rev: head.Sha,
+			Fork: head.Repo == nil || base.Repo == nil || !strings.EqualFold(head.Repo.FullName, base.Repo.FullName),
+		}
+		switch p.Action {
+		case "opened", "reopened", "synchronize", "synchronized":
+			pr.Action = "update"
+		case "closed":
+			pr.Action = "close"
+		}
+		return pr
+	case d.Event == "Merge Request Hook":
+		var p struct {
+			Attrs struct {
+				IID             int    `json:"iid"`
+				Action          string `json:"action"`
+				SourceBranch    string `json:"source_branch"`
+				SourceProjectID int    `json:"source_project_id"`
+				TargetProjectID int    `json:"target_project_id"`
+				LastCommit      struct {
+					ID string `json:"id"`
+				} `json:"last_commit"`
+			} `json:"object_attributes"`
+		}
+		if json.Unmarshal(body, &p) != nil || p.Attrs.IID <= 0 {
+			return nil
+		}
+		a := p.Attrs
+		pr := &PullRequest{
+			Number: a.IID, Branch: a.SourceBranch, Rev: a.LastCommit.ID,
+			Fork: a.SourceProjectID != a.TargetProjectID,
+		}
+		switch a.Action {
+		case "open", "reopen", "update":
+			pr.Action = "update"
+		case "close", "merge":
+			pr.Action = "close"
+		}
+		return pr
+	}
+	return nil
 }
 
 // ref extracts the pushed ref from a JSON body, or from the form-encoded
 // "payload" field GitHub sends when the hook's content type is
 // application/x-www-form-urlencoded.
 func ref(h http.Header, body []byte) string {
-	if strings.HasPrefix(h.Get("Content-Type"), "application/x-www-form-urlencoded") {
-		if form, err := url.ParseQuery(string(body)); err == nil {
-			body = []byte(form.Get("payload"))
-		}
-	}
+	body = payload(h, body)
 	var payload struct {
 		Ref string `json:"ref"`
 	}

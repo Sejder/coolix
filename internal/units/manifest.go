@@ -49,11 +49,13 @@ type App struct {
 	Health          Health            `json:"health"`
 	Env             map[string]string `json:"env,omitempty"`
 	Secrets         bool              `json:"secrets,omitempty"`
-	Path            []string          `json:"path,omitempty"`
-	Databases       []Database        `json:"databases,omitempty"`
-	Hardening       map[string]any    `json:"hardening,omitempty"`
-	Resources       Resources         `json:"resources"`
-	Backup          Backup            `json:"backup"`
+	// SecretsFrom gives a preview its parent app's secrets (opt-in).
+	SecretsFrom string         `json:"secrets_from,omitempty"`
+	Path        []string       `json:"path,omitempty"`
+	Databases   []Database     `json:"databases,omitempty"`
+	Hardening   map[string]any `json:"hardening,omitempty"`
+	Resources   Resources      `json:"resources"`
+	Backup      Backup         `json:"backup"`
 }
 
 // Port returns the port of a slot (blue = PortBase, green = PortBase+1).
